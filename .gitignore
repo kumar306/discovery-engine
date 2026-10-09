@@ -1,0 +1,54 @@
+# --- Private working files (not part of the published project, for now) -------------------------------------
+# Working notes and assistant instructions. Public docs (ARCHITECTURE, RUNBOOK, DECISIONS) will be un-ignored
+# explicitly, one by one, after a review pass.
+CLAUDE.md
+.claude/
+docs/
+
+# --- Python / tooling ----------------------------------------------------------------------------------------
+.venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# --- Secrets and environment: never commit -----------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*
+*.secret
+
+# --- Data: licences + size. Scripts download it; aggregates and scripts are what we commit ------------------
+data/
+*.parquet
+spark-warehouse/
+checkpoints/
+metastore_db/
+derby.log
+
+# --- Terraform (the lock file .terraform.lock.hcl IS committed) ---------------------------------------------
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfplan
+crash.log
+
+# --- Editors / OS --------------------------------------------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+
+# Raw benchmark artefacts ARE committed under benchmarks/results/ - do not ignore.

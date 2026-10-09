@@ -1,0 +1,9 @@
+# Normalise line endings: LF in the repository AND in working copies on every platform.
+# (A Makefile or shell script with CRLF endings breaks on Linux, in CI and inside containers.)
+* text=auto eol=lf
+
+# Binary files: never touch
+*.png  binary
+*.jpg  binary
+*.zip  binary
+*.parquet binary
