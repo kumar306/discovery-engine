@@ -57,6 +57,30 @@ services:
     build: { context: ../.., dockerfile: deploy/compose/stub-llm.Dockerfile }
     ports: ["8089:8089"]
 
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: search
+      POSTGRES_PASSWORD: search_dev_only
+      POSTGRES_DB: search
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U search -d search"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  s3:
+    image: motoserver/moto:5.2.3
+    ports: ["127.0.0.1:5000:5000"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/moto-api/"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
 volumes:
   redpanda-data:
   qdrant-data:
+  postgres-data:

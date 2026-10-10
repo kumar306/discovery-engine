@@ -10,7 +10,7 @@ help:            ## list targets
 setup:           ## install Python 3.12 deps (uv)
 	uv sync --group ml --group dev
 
-up:              ## start Redpanda, Qdrant, Redis
+up:              ## start Redpanda, Qdrant, Redis, Postgres, Moto (S3)
 	$(COMPOSE) up -d --wait
 
 down:            ## stop and delete local stack volumes
