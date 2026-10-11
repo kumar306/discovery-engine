@@ -186,6 +186,13 @@ def test_locale_rejects_everything_else(locale: object) -> None:
     assert bad_fields(exc_info) == {"locale"}
 
 
+@pytest.mark.parametrize("title", ["a\ud800b", "\udfff"])
+def test_lone_surrogates_are_rejected_so_text_always_encodes_to_utf8(title: str) -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        UpsertRequest.model_validate(make_upsert(title=title))
+    assert bad_fields(exc_info) == {"title"}
+
+
 # 5. errors are field level and complete, so the 422 body can name every problem at once
 
 
