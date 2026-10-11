@@ -74,9 +74,13 @@ def test_non_ascii_text_is_written_as_utf8_not_escaped() -> None:
 
 
 def test_the_serialiser_does_not_normalise_unicode() -> None:
-    composed = canonical_bytes(make_request(title="café"))
-    decomposed = canonical_bytes(make_request(title="café"))
-    assert composed != decomposed  # NFC is the composer's job (C4.2), not the stored document's
+    composed = "caf" + chr(0xE9)  # the accent is part of one code point
+    decomposed = "cafe" + chr(0x301)  # the letter e, then a separate combining accent
+    assert composed != decomposed
+    # NFC is the composer's job (C4.2), not the stored document's
+    assert canonical_bytes(make_request(title=composed)) != canonical_bytes(
+        make_request(title=decomposed)
+    )
 
 
 # 11. pinned vectors: if one of these fails, every stored hash and point id has just changed
