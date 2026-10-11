@@ -2,7 +2,7 @@
 COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 UV := uv run
 
-.PHONY: help setup up down test test-integration test-spark lint typecheck eval bench chaos deploy data
+.PHONY: help setup up down topics test test-integration test-spark lint typecheck eval bench chaos deploy data
 
 help:            ## list targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-18s %s\n",$$1,$$2}'
@@ -10,11 +10,15 @@ help:            ## list targets
 setup:           ## install Python 3.12 deps (uv)
 	uv sync --group ml --group dev
 
-up:              ## start Redpanda, Qdrant, Redis, Postgres, Moto (S3)
+up:              ## start Redpanda, Qdrant, Redis, Postgres, PgBouncer, Moto (S3)
 	$(COMPOSE) up -d --wait
 
 down:            ## stop and delete local stack volumes
 	$(COMPOSE) down -v
+
+topics:          ## create the Kafka topics (doc.events with 24 partitions, and its dead letter topic)
+	$(COMPOSE) exec -T redpanda sh -c 'rpk topic describe doc.events >/dev/null 2>&1 || rpk topic create doc.events -p 24 -r 1'
+	$(COMPOSE) exec -T redpanda sh -c 'rpk topic describe doc.events.dlq >/dev/null 2>&1 || rpk topic create doc.events.dlq -p 24 -r 1'
 
 lint:            ## ruff
 	$(UV) ruff check . && $(UV) ruff format --check .
@@ -25,7 +29,7 @@ typecheck:       ## mypy --strict
 test: lint typecheck  ## fast tests (unit + property + contract), no Docker
 	$(UV) pytest
 
-test-integration: ## Testcontainers: real Redpanda + Qdrant + Redis
+test-integration: ## tests that need the compose stack, run make up first
 	$(UV) pytest -m integration -o addopts=""
 
 test-spark:      ## Spark tests inside Docker (Windows hosts lack winutils)

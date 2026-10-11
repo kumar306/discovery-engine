@@ -80,6 +80,26 @@ services:
       timeout: 3s
       retries: 20
 
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.26.0-p0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_USER: search
+      DB_PASSWORD: search_dev_only
+      POOL_MODE: transaction
+      AUTH_TYPE: scram-sha-256
+      DEFAULT_POOL_SIZE: "20"
+      MAX_CLIENT_CONN: "200"
+    ports: ["127.0.0.1:6432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
 volumes:
   redpanda-data:
   qdrant-data:

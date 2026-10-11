@@ -16,6 +16,8 @@ dependencies = [
     "redis>=5.0",
     "prometheus-client>=0.20",
     "numpy>=1.26",
+    "psycopg[binary,pool]>=3.3.6",
+    "boto3>=1.43.111",
 ]
 
 [dependency-groups]
@@ -42,6 +44,7 @@ dev = [
     "schemathesis>=3.35",
     "types-redis",
     "pandas-stubs",
+    "boto3-stubs[s3]>=1.43.111",
 ]
 loadtest = [
     "locust>=2.31",
@@ -86,7 +89,7 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
-    "integration: needs Docker (Redpanda, Qdrant, Redis) via Testcontainers",
+    "integration: needs the compose stack (Postgres, PgBouncer, Moto, Redpanda), run make up first",
     "failure: fault-injection tests through Toxiproxy",
     "spark: needs a local Spark session (run in Docker on Windows)",
     "eval: retrieval-quality regression gate",
