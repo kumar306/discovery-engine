@@ -6,15 +6,18 @@ inside a pooled transaction. Everything the application does goes through pgboun
 
 import os
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 import psycopg
 import pytest
 from psycopg import sql
+from psycopg_pool import AsyncConnectionPool
 
 from libs.db.migrate import migrate
+from libs.db.pool import create_pool
+from services.ingest.settings import IngestSettings
 
 DIRECT = os.environ.get("TEST_POSTGRES_DIRECT", "search:search_dev_only@127.0.0.1:5432")
 POOLED = os.environ.get("TEST_POSTGRES_POOLED", "search:search_dev_only@127.0.0.1:6432")
@@ -76,3 +79,17 @@ def db(migrated_database: Database) -> Database:
     with psycopg.connect(migrated_database.direct_dsn, autocommit=True) as conn:
         conn.execute("truncate documents, outbox restart identity")
     return migrated_database
+
+
+# the app pool is as big as the production default, tests never use more writers than this
+APP_POOL_SIZE: int = IngestSettings.model_fields["db_pool_max"].default
+
+
+@pytest.fixture
+async def pool(db: Database) -> AsyncIterator[AsyncConnectionPool]:
+    pool = create_pool(db.pooled_dsn, max_size=APP_POOL_SIZE, timeout=2.0)
+    await pool.open(wait=True, timeout=10)
+    try:
+        yield pool
+    finally:
+        await pool.close()
