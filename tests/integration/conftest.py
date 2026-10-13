@@ -4,19 +4,24 @@ Databases are created through the direct postgres port because create and drop d
 inside a pooled transaction. Everything the application does goes through pgbouncer, as in prod.
 """
 
+import json
 import os
 import random
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import boto3
+import httpx
 import psycopg
 import pytest
 from botocore.config import Config
+from botocore.exceptions import ClientError
 from psycopg import sql
 from psycopg_pool import AsyncConnectionPool
 
@@ -24,6 +29,10 @@ from libs.db.migrate import migrate
 from libs.db.pool import create_pool
 from libs.resilience.bulkhead import Bulkhead
 from libs.resilience.retry import RetryPolicy
+from libs.schemas import UpsertRequest, doc_event_adapter
+from services.ingest.app import create_app
+from services.ingest.repository import DocumentRepository
+from services.ingest.service import IngestService
 from services.ingest.settings import IngestSettings
 from services.ingest.storage import DocumentStore
 
@@ -185,3 +194,87 @@ def outbox(dsn: str, doc_id: str | None = None) -> list[tuple[Any, ...]]:
         if doc_id is None:
             return conn.execute(OUTBOX_COLUMNS + " order by id").fetchall()
         return conn.execute(OUTBOX_COLUMNS + " where doc_id = %s order by id", (doc_id,)).fetchall()
+
+
+# the api itself, served in process through httpx with the real stores behind it
+NOW = datetime(2026, 10, 12, 9, 30, tzinfo=UTC)
+
+
+@dataclass
+class Api:
+    client: httpx.AsyncClient
+    store: DocumentStore
+    bucket: str
+    database: Database
+
+    async def post(self, doc_id: str = "D1", version: int = 1, **fields: Any) -> httpx.Response:
+        body = {
+            "corpus": "esci",
+            "doc_id": doc_id,
+            "version": version,
+            "title": "Mouse",
+            "locale": "us",
+        }
+        body.update(fields)
+        return await self.client.post("/v1/documents", content=json.dumps(body).encode())
+
+    async def delete(self, doc_id: str = "D1", version: int = 1) -> httpx.Response:
+        return await self.client.delete(f"/v1/documents/{doc_id}", params={"version": version})
+
+    def object_bytes(self, key: str) -> bytes:
+        return moto_client().get_object(Bucket=self.bucket, Key=key)["Body"].read()
+
+    def object_exists(self, key: str) -> bool:
+        try:
+            moto_client().head_object(Bucket=self.bucket, Key=key)
+        except ClientError:
+            return False
+        return True
+
+    def events(self, doc_id: str) -> list[Any]:
+        return [
+            doc_event_adapter.validate_json(json.dumps(row[4]))
+            for row in outbox(self.database.direct_dsn, doc_id)
+        ]
+
+
+def request_for(doc_id: str = "D1", version: int = 1, **fields: Any) -> UpsertRequest:
+    body = {
+        "corpus": "esci",
+        "doc_id": doc_id,
+        "version": version,
+        "title": "Mouse",
+        "locale": "us",
+    }
+    body.update(fields)
+    return UpsertRequest.model_validate(body)
+
+
+@asynccontextmanager
+async def serving(
+    pool: AsyncConnectionPool,
+    bucket: str,
+    database: Database,
+    *,
+    store: DocumentStore | None = None,
+    repository: Any = None,
+    settings: IngestSettings | None = None,
+) -> AsyncIterator[Api]:
+    settings = settings or IngestSettings()
+    store = store or make_store(moto_client(), bucket)[0]
+    repository = repository or DocumentRepository(pool, settings.db_lock_timeout_s)
+    service = IngestService(repository, store, clock=lambda: NOW)
+    app = create_app(service, settings)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://api"
+    ) as client:
+        try:
+            yield Api(client, store, bucket, database)
+        finally:
+            store.close()
+
+
+@pytest.fixture
+async def api(pool: AsyncConnectionPool, bucket: str, db: Database) -> AsyncIterator[Api]:
+    async with serving(pool, bucket, db) as served:
+        yield served

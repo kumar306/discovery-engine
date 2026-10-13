@@ -28,6 +28,8 @@ insert into outbox (doc_id, request_id, event_schema, payload)
 values (%s, %s, %s, %s::jsonb)
 """
 
+_SET_LOCK_TIMEOUT = "select set_config('lock_timeout', %s, true)"
+
 _KNOWN = (
     "select latest_version, latest_content_sha from documents where corpus = %s and doc_id = %s"
 )
@@ -53,8 +55,9 @@ class AcceptResult:
 
 
 class DocumentRepository:
-    def __init__(self, pool: AsyncConnectionPool) -> None:
+    def __init__(self, pool: AsyncConnectionPool, lock_timeout_s: float = 2.0) -> None:
         self._pool = pool
+        self._lock_timeout_ms = int(lock_timeout_s * 1000)
 
     async def known(self, corpus: str, doc_id: str) -> KnownDocument | None:
         async with self._pool.connection() as conn:
@@ -72,6 +75,10 @@ class DocumentRepository:
         async with self._pool.connection() as conn:
             # the document row and its outbox row commit together or not at all
             async with conn.transaction():
+                # a writer that waits on a row lock gives up after the timeout instead of hanging
+                # set_config with true lasts only for this transaction, a session setting would
+                # stay on a pgbouncer server connection and leak into whoever borrows it next
+                await conn.execute(_SET_LOCK_TIMEOUT, (f"{self._lock_timeout_ms}ms",))
                 # execute sends the query and waits for the reply, the only network trip here
                 # psycopg pulls the whole result into this process, so the second await is no trip
                 # fetchone only takes the first row from that local copy

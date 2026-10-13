@@ -3,6 +3,7 @@
 The service behind the app is a recorder, so every test can also say whether it was reached.
 """
 
+import asyncio
 import io
 import json
 import logging
@@ -13,12 +14,17 @@ from typing import Any
 
 import httpx
 import pytest
+from psycopg import OperationalError
+from psycopg.errors import AdminShutdown, LockNotAvailable
+from psycopg_pool import PoolTimeout
 
 from libs.observability.logging import JsonFormatter
+from libs.resilience.bulkhead import Overloaded
 from libs.schemas import UpsertRequest
 from services.ingest.app import create_app
 from services.ingest.service import Accepted, Refused
 from services.ingest.settings import IngestSettings
+from services.ingest.storage import StorageUnavailable
 
 NOW = datetime(2026, 10, 12, 9, 30, tzinfo=UTC)
 LIMIT = 2000
@@ -27,11 +33,27 @@ LIMIT = 2000
 class RecordingIngest:
     def __init__(self, result: Accepted | Refused | None = None) -> None:
         self.result = result or Accepted("D1", 1, NOW)
+        self.error: BaseException | None = None
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.release.set()
         self.calls: list[tuple[UpsertRequest, str]] = []
+        self.deletes: list[tuple[str, int, str]] = []
+
+    async def _answer(self) -> Accepted | Refused:
+        self.entered.set()
+        await self.release.wait()
+        if self.error is not None:
+            raise self.error
+        return self.result
 
     async def upsert(self, request: UpsertRequest, request_id: str) -> Accepted | Refused:
         self.calls.append((request, request_id))
-        return self.result
+        return await self._answer()
+
+    async def delete(self, doc_id: str, version: int, request_id: str) -> Accepted | Refused:
+        self.deletes.append((doc_id, version, request_id))
+        return await self._answer()
 
 
 def product(**overrides: Any) -> dict[str, Any]:
@@ -65,8 +87,8 @@ def logs() -> Iterator[LogCapture]:
     logger.removeHandler(handler)
 
 
-async def make_client(service: RecordingIngest) -> httpx.AsyncClient:
-    app = create_app(service, IngestSettings(max_body_bytes=LIMIT))
+async def make_client(service: RecordingIngest, **settings: Any) -> httpx.AsyncClient:
+    app = create_app(service, IngestSettings(max_body_bytes=LIMIT, **settings))
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://api")
 
 
@@ -277,3 +299,164 @@ async def test_a_refusal_becomes_a_409_with_the_current_version(
     # the human text has to match the code, a stale write is not a content conflict
     assert ("newer version" in body["message"]) == (error == "stale_version")
     assert ("different content" in body["message"]) == (error == "content_conflict")
+
+
+# DELETE
+
+
+async def delete(
+    client: httpx.AsyncClient, doc_id: str = "D1", version: str | None = "3"
+) -> httpx.Response:
+    params = None if version is None else {"version": version}
+    return await client.delete(f"/v1/documents/{doc_id}", params=params)
+
+
+async def test_a_delete_reaches_the_service_and_gets_the_202_body(
+    client: httpx.AsyncClient, service: RecordingIngest
+) -> None:
+    service.result = Accepted("D1", 3, NOW)
+    response = await delete(client, "D1", "3")
+    assert response.status_code == 202
+    assert response.json() == {
+        "request_id": response.headers["x-request-id"],
+        "doc_id": "D1",
+        "version": 3,
+        "accepted_at": NOW.isoformat(),
+    }
+    assert service.deletes == [("D1", 3, response.json()["request_id"])]
+
+
+async def test_the_largest_version_a_bigint_can_hold_is_accepted(
+    client: httpx.AsyncClient, service: RecordingIngest
+) -> None:
+    assert (await delete(client, "D1", str(2**63 - 1))).status_code == 202
+    assert service.deletes[0][1] == 2**63 - 1
+
+
+@pytest.mark.parametrize(
+    ("doc_id", "version", "fields"),
+    [
+        pytest.param("D1", None, {"version"}, id="version missing"),
+        pytest.param("D1", "", {"version"}, id="version empty"),
+        pytest.param("D1", "-1", {"version"}, id="negative"),
+        pytest.param("D1", "1.5", {"version"}, id="decimal"),
+        pytest.param("D1", "abc", {"version"}, id="not a number"),
+        pytest.param("D1", "+5", {"version"}, id="explicit plus sign"),
+        pytest.param("D1", " 5", {"version"}, id="leading space"),
+        pytest.param("D1", "\u0665", {"version"}, id="an arabic indic digit"),
+        pytest.param("D1", str(2**63), {"version"}, id="one past bigint"),
+        pytest.param("D1", "9" * 25, {"version"}, id="far past bigint"),
+        pytest.param("a" * 65, "1", {"doc_id"}, id="doc id too long"),
+        pytest.param("has space", "1", {"doc_id"}, id="doc id with a space"),
+        pytest.param("a" * 65, "x", {"doc_id", "version"}, id="both wrong"),
+    ],
+)
+async def test_a_delete_with_bad_input_gets_a_422_and_never_reaches_the_service(
+    client: httpx.AsyncClient,
+    service: RecordingIngest,
+    doc_id: str,
+    version: str | None,
+    fields: set[str],
+) -> None:
+    response = await delete(client, doc_id, version)
+    assert response.status_code == 422
+    assert response.json()["error"] == "validation_failed"
+    assert {item["field"] for item in response.json()["errors"]} == fields
+    assert service.deletes == []
+
+
+async def test_a_refused_delete_is_a_409_like_a_refused_write() -> None:
+    service = RecordingIngest(Refused("stale_version", 9))
+    async with await make_client(service) as client:
+        response = await delete(client, "D1", "3")
+    assert response.status_code == 409
+    assert (response.json()["error"], response.json()["current_version"]) == ("stale_version", 9)
+
+
+# the 503 answers: every way a dependency can say no
+
+UNAVAILABLE = [
+    pytest.param(
+        StorageUnavailable("s3 down"), "storage_unavailable", "storage_unavailable", id="s3 down"
+    ),
+    pytest.param(Overloaded("full"), "storage_overloaded", "overloaded", id="s3 bulkhead full"),
+    pytest.param(
+        PoolTimeout("no connection"), "pool_exhausted", "database_busy", id="pool exhausted"
+    ),
+    pytest.param(LockNotAvailable("lock"), "lock_timeout", "database_busy", id="row lock timeout"),
+    pytest.param(
+        OperationalError("refused"), "database_unavailable", "database_busy", id="cannot connect"
+    ),
+    pytest.param(
+        AdminShutdown("restart"), "database_unavailable", "database_busy", id="database restarting"
+    ),
+]
+
+
+@pytest.mark.parametrize(("error", "outcome", "code"), UNAVAILABLE)
+@pytest.mark.parametrize("route", ["post", "delete"])
+async def test_a_failing_dependency_is_a_503_with_retry_after_and_the_request_id(
+    logs: LogCapture, error: Exception, outcome: str, code: str, route: str
+) -> None:
+    service = RecordingIngest()
+    service.error = error
+    async with await make_client(service, retry_after_s=7) as client:
+        response = (
+            await post(client, product()) if route == "post" else await delete(client, "D1", "3")
+        )
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "7"
+    body = response.json()
+    assert (body["error"], body["request_id"]) == (code, response.headers["x-request-id"])
+    (line,) = logs.lines()
+    assert (line["status"], line["outcome"]) == (503, outcome)
+
+
+# the outer admission limit
+
+
+async def test_a_full_house_answers_503_at_once_and_frees_up_afterwards(
+    logs: LogCapture,
+) -> None:
+    service = RecordingIngest()
+    service.release.clear()  # the first request will sit inside the service
+    async with await make_client(service, max_inflight_requests=1, admission_wait_s=0.01) as client:
+        first = asyncio.create_task(post(client, product(doc_id="D1")))
+        await asyncio.wait_for(service.entered.wait(), timeout=5)
+        # bounded, so a missing limit fails the test instead of waiting for the blocked service
+        shed = await asyncio.wait_for(post(client, product(doc_id="D2")), timeout=5)
+        assert shed.status_code == 503
+        assert shed.json()["error"] == "overloaded"
+        assert shed.headers["retry-after"] == "1"
+        # probes and unknown paths are not counted, they must answer even when the api is full
+        assert (await client.get("/nothing-here")).status_code == 404
+        service.release.set()
+        assert (await first).status_code == 202
+        assert (await post(client, product(doc_id="D3"))).status_code == 202
+    assert [doc[0].doc_id for doc in service.calls] == ["D1", "D3"]  # the shed one never got in
+    assert "admission_full" in [line["outcome"] for line in logs.lines()]
+
+
+# anything we did not plan for
+
+
+async def test_an_unexpected_error_is_a_500_that_tells_the_client_nothing(
+    logs: LogCapture,
+) -> None:
+    service = RecordingIngest()
+    service.error = RuntimeError("secret internal detail")
+    async with await make_client(service) as client:
+        response = await post(client, product())
+    assert response.status_code == 500
+    body = response.json()
+    assert (body["error"], body["request_id"]) == (
+        "internal_error",
+        response.headers["x-request-id"],
+    )
+    assert "secret internal detail" not in response.text
+    assert "Traceback" not in response.text
+    error_line, access_line = logs.lines()
+    assert error_line["level"] == "ERROR"
+    assert "secret internal detail" in error_line["exception"]
+    assert error_line["request_id"] == access_line["request_id"] == body["request_id"]
+    assert (access_line["status"], access_line["outcome"]) == (500, "internal_error")

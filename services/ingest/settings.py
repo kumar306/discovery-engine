@@ -17,6 +17,8 @@ class IngestSettings(BaseSettings):
     database_dsn: str = "postgresql://search:search_dev_only@127.0.0.1:6432/search"
     db_pool_max: PositiveInt = 8
     db_pool_timeout_s: PositiveFloat = 2.0
+    # how long a write may wait for a row lock held by another transaction before it gives up
+    db_lock_timeout_s: PositiveFloat = 2.0
 
     # s3, the endpoint is only set for the local moto stand in
     s3_endpoint_url: str | None = "http://127.0.0.1:5000"
@@ -27,8 +29,15 @@ class IngestSettings(BaseSettings):
     s3_bulkhead_limit: PositiveInt = 8
     s3_bulkhead_wait_s: PositiveFloat = 0.5
 
-    # http
+    # http, the host is only widened to all interfaces inside a container
+    host: str = "127.0.0.1"
+    port: PositiveInt = 8000
     max_body_bytes: PositiveInt = 256 * 1024
+    # seconds a client is told to wait before retrying after a 503
+    retry_after_s: PositiveInt = 1
+    # the outermost limit: requests being served at once, a full house answers 503 at once
+    max_inflight_requests: PositiveInt = 32
+    admission_wait_s: PositiveFloat = 0.05
 
     # kafka and the outbox relay
     kafka_bootstrap: str = "127.0.0.1:19092"

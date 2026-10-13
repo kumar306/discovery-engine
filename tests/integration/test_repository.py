@@ -281,3 +281,47 @@ async def test_a_caller_fails_fast_when_every_connection_is_busy(db: Database) -
                 await accept(tiny, "D1", 1)
     finally:
         await tiny.close()
+
+
+# the lock timeout: a writer stuck behind a row lock gives up instead of hanging
+
+
+async def test_a_writer_stuck_behind_a_row_lock_gives_up_after_the_timeout(
+    pool: AsyncConnectionPool, db: Database
+) -> None:
+    await accept(pool, "D1", 5)
+    first = await psycopg.AsyncConnection.connect(db.direct_dsn)  # holds the row and never commits
+    try:
+        await first.execute(
+            "update documents set latest_version = 6 where corpus = 'esci' and doc_id = 'D1'"
+        )
+        repo = DocumentRepository(pool, lock_timeout_s=0.3)
+        started = time.monotonic()
+        # the outer limit keeps a missing timeout from hanging the whole test run
+        with pytest.raises(psycopg.errors.LockNotAvailable):
+            async with asyncio.timeout(10):
+                await repo.accept("esci", "D1", 7, SHA_B, outgoing("D1", 7))
+        waited = time.monotonic() - started
+        assert 0.25 <= waited < 3  # it did wait for the timeout, and no longer than that
+    finally:
+        await first.rollback()
+        await first.close()
+    # nothing was left half done, the same write goes through once the row is free
+    assert await accept(pool, "D1", 7, SHA_B) == AcceptResult(ACCEPTED, 7)
+
+
+async def test_the_lock_timeout_covers_one_transaction_and_is_not_left_on_the_connection(
+    db: Database,
+) -> None:
+    # straight to postgres on purpose: behind pgbouncer the next statement may run elsewhere
+    single = create_pool(db.direct_dsn, max_size=1, timeout=2.0)
+    await single.open(wait=True, timeout=10)
+    try:
+        await DocumentRepository(single, lock_timeout_s=0.3).accept(
+            "esci", "D1", 1, SHA_A, outgoing("D1", 1)
+        )
+        async with single.connection() as conn:
+            row = await (await conn.execute("show lock_timeout")).fetchone()
+        assert row == ("0",)  # the default, so a later transaction never inherits our 300 ms
+    finally:
+        await single.close()

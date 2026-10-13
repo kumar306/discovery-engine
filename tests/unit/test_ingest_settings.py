@@ -22,6 +22,14 @@ def test_the_defaults_are_valid_and_point_at_pgbouncer() -> None:
     assert settings.s3_bulkhead_limit <= int(settings.s3_threads * 0.8)
 
 
+def test_the_new_api_limits_have_sane_defaults() -> None:
+    settings = IngestSettings()
+    assert (settings.host, settings.port) == ("127.0.0.1", 8000)
+    assert settings.retry_after_s == 1
+    assert settings.max_inflight_requests > settings.s3_bulkhead_limit
+    assert settings.db_lock_timeout_s <= settings.db_pool_timeout_s + 1
+
+
 def test_environment_variables_override_the_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("INGEST_S3_THREADS", "20")
     monkeypatch.setenv("INGEST_S3_BULKHEAD_LIMIT", "16")
@@ -64,6 +72,11 @@ def test_the_bulkhead_must_leave_headroom_in_the_thread_pool(
         "INGEST_MAX_BODY_BYTES",
         "INGEST_RELAY_BATCH_SIZE",
         "INGEST_RELAY_POLL_INTERVAL_S",
+        "INGEST_DB_LOCK_TIMEOUT_S",
+        "INGEST_RETRY_AFTER_S",
+        "INGEST_MAX_INFLIGHT_REQUESTS",
+        "INGEST_ADMISSION_WAIT_S",
+        "INGEST_PORT",
     ],
 )
 @pytest.mark.parametrize("value", ["0", "-1"])

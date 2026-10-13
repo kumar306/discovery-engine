@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from libs.schemas import UpsertRequest
-from services.ingest.events import EVENT_SCHEMA, prepare_upsert
+from services.ingest.events import EVENT_SCHEMA, prepare_delete, prepare_upsert
 from services.ingest.repository import AcceptResult, Outcome
 from services.ingest.rules import KnownDocument
 from services.ingest.service import Accepted, IngestService, Refused
@@ -163,3 +163,75 @@ async def test_the_event_time_is_read_before_the_work_and_accepted_at_after_it()
     assert isinstance(result, Accepted)
     assert result.accepted_at == T0 + timedelta(seconds=1)
     assert prepare_upsert(request(5), T0).event_json == repo.accepted[0][4].payload
+
+
+# delete: the same flow without the s3 step
+
+
+@pytest.mark.parametrize(
+    ("known", "expected"),
+    [
+        pytest.param(
+            KnownDocument(7, None), Refused("stale_version", 7), id="a newer version is held"
+        ),
+        pytest.param(
+            KnownDocument(5, SHA), Refused("content_conflict", 5), id="an upsert holds this version"
+        ),
+    ],
+)
+async def test_a_delete_the_precheck_refuses_writes_nothing(
+    known: KnownDocument, expected: Refused
+) -> None:
+    repo, store = StubRepository(known), StubStore()
+    assert await service(repo, store).delete("D1", 5, "r") == expected
+    assert (repo.accepted, store.puts) == ([], [])
+
+
+async def test_a_delete_that_was_already_accepted_is_accepted_again_without_a_write() -> None:
+    repo, store = StubRepository(KnownDocument(5, None)), StubStore()
+    assert isinstance(await service(repo, store).delete("D1", 5, "r"), Accepted)
+    assert (repo.accepted, store.puts) == ([], [])
+
+
+async def test_a_delete_goes_to_postgres_with_no_sha_and_never_touches_s3() -> None:
+    repo = StubRepository(KnownDocument(3, SHA), AcceptResult(Outcome.ACCEPTED, 5))
+    store = StubStore()
+    result = await service(repo, store).delete("D1", 5, "req-4")
+    ((corpus, doc_id, version, sha, outgoing),) = repo.accepted
+    assert (corpus, doc_id, version, sha) == ("esci", "D1", 5, None)
+    assert (outgoing.request_id, outgoing.event_schema) == ("req-4", EVENT_SCHEMA)
+    assert outgoing.payload == prepare_delete("esci", "D1", 5, T0).event_json
+    assert store.puts == []
+    assert isinstance(result, Accepted)
+
+
+@pytest.mark.parametrize(
+    ("accept", "expected"),
+    [
+        pytest.param(
+            AcceptResult(Outcome.ACCEPTED, 5),
+            Accepted("D1", 5, T0 + timedelta(seconds=1)),
+            id="won",
+        ),
+        pytest.param(
+            AcceptResult(Outcome.DUPLICATE, 5),
+            Accepted("D1", 5, T0 + timedelta(seconds=1)),
+            id="an identical delete won first",
+        ),
+        pytest.param(
+            AcceptResult(Outcome.CONFLICT, 8),
+            Refused("stale_version", 8),
+            id="a newer version won first",
+        ),
+        pytest.param(
+            AcceptResult(Outcome.CONFLICT, 5),
+            Refused("content_conflict", 5),
+            id="an upsert won this version",
+        ),
+    ],
+)
+async def test_the_compare_and_set_has_the_last_word_for_a_delete_too(
+    accept: AcceptResult, expected: Accepted | Refused
+) -> None:
+    repo, store = StubRepository(None, accept), StubStore()
+    assert await service(repo, store).delete("D1", 5, "r") == expected
