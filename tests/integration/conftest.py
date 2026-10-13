@@ -4,13 +4,15 @@ Databases are created through the direct postgres port because create and drop d
 inside a pooled transaction. Everything the application does goes through pgbouncer, as in prod.
 """
 
+import asyncio
 import json
 import os
 import random
+import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +22,8 @@ import boto3
 import httpx
 import psycopg
 import pytest
+from aiokafka import AIOKafkaConsumer
+from aiokafka.admin import AIOKafkaAdminClient, NewTopic
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from psycopg import sql
@@ -278,3 +282,74 @@ async def serving(
 async def api(pool: AsyncConnectionPool, bucket: str, db: Database) -> AsyncIterator[Api]:
     async with serving(pool, bucket, db) as served:
         yield served
+
+
+# kafka: every test gets its own topic, so messages from one test never reach another
+KAFKA = os.environ.get(
+    "TEST_KAFKA_BOOTSTRAP", IngestSettings.model_fields["kafka_bootstrap"].default
+)
+
+
+@pytest.fixture
+async def topic() -> AsyncIterator[str]:
+    name = f"doc.events.test.{uuid.uuid4().hex[:10]}"
+    admin = AIOKafkaAdminClient(bootstrap_servers=KAFKA)
+    await admin.start()
+    try:
+        await admin.create_topics([NewTopic(name=name, num_partitions=6, replication_factor=1)])
+        yield name
+    finally:
+        with suppress(Exception):
+            await admin.delete_topics([name])
+        await admin.close()
+
+
+async def read_topic(
+    name: str, expected: int, quiet_s: float = 0.7, limit_s: float = 20.0
+) -> list[Any]:
+    """Read until `expected` messages arrived, then keep listening for unexpected extras."""
+    consumer = AIOKafkaConsumer(
+        name,
+        bootstrap_servers=KAFKA,
+        group_id=None,
+        auto_offset_reset="earliest",
+        enable_auto_commit=False,
+    )
+    await consumer.start()
+    seen: list[Any] = []
+    try:
+        async with asyncio.timeout(limit_s):
+            while len(seen) < expected:
+                for batch in (await consumer.getmany(timeout_ms=500)).values():
+                    seen.extend(batch)
+        # nothing more should come: wait for a quiet moment before saying that is all there is
+        quiet_until = time.monotonic() + quiet_s
+        while time.monotonic() < quiet_until:
+            for batch in (await consumer.getmany(timeout_ms=200)).values():
+                seen.extend(batch)
+                quiet_until = time.monotonic() + quiet_s
+    finally:
+        await consumer.stop()
+    return seen
+
+
+def add_events(
+    dsn: str, count: int, doc_id: str = "D1", first_version: int = 1, tag: str = "x"
+) -> list[int]:
+    """Put `count` events in the outbox the way the api would, return their ids."""
+    ids = []
+    with psycopg.connect(dsn) as conn:
+        for number in range(count):
+            version = first_version + number
+            row = conn.execute(
+                "insert into outbox (doc_id, request_id, event_schema, payload) "
+                "values (%s, %s, 'doc_event_v1', %s::jsonb) returning id",
+                (
+                    doc_id,
+                    f"req-{tag}-{version}",
+                    json.dumps({"doc_id": doc_id, "version": version, "tag": tag}),
+                ),
+            ).fetchone()
+            assert row is not None
+            ids.append(row[0])
+    return ids
