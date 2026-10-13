@@ -1,84 +1,23 @@
 """The S3 adapter against Moto, the local S3 stand in: real conditional writes, real failures."""
 
 import asyncio
-import random
 import threading
 import uuid
 from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any
 
-import boto3
 import pytest
-from botocore.config import Config
 
-from libs.resilience.bulkhead import Bulkhead, Overloaded
-from libs.resilience.retry import RetryPolicy
+from libs.resilience.bulkhead import Overloaded
 from libs.schemas import UpsertRequest
 from libs.schemas.hashing import content_sha
 from services.ingest.events import prepare_upsert
-from services.ingest.settings import IngestSettings
 from services.ingest.storage import DocumentStore, PutResult, StorageUnavailable
 
-ENDPOINT = "http://127.0.0.1:5000"
-POLICY = RetryPolicy(max_attempts=3, base_delay=0.01, max_delay=0.05)
+from .conftest import POLICY, S3_BULKHEAD_LIMIT, Sleeps, make_store, moto_client
+
 NOW = datetime(2026, 10, 12, 9, 30, tzinfo=UTC)
-DEFAULTS = IngestSettings()
-
-
-class Sleeps:
-    def __init__(self) -> None:
-        self.delays: list[float] = []
-
-    async def __call__(self, seconds: float) -> None:
-        self.delays.append(seconds)
-
-
-def moto_client(endpoint: str = ENDPOINT, timeout: float = 3.0) -> Any:
-    return boto3.client(
-        "s3",
-        endpoint_url=endpoint,
-        region_name="us-east-1",
-        # moto accepts any credentials, real aws would use the pod role
-        aws_access_key_id="test",
-        aws_secret_access_key="test",
-        config=Config(
-            connect_timeout=timeout,
-            read_timeout=timeout,
-            retries={"total_max_attempts": 1},
-            max_pool_connections=DEFAULTS.s3_threads,
-        ),
-    )
-
-
-def make_store(
-    client: Any, bucket: str, limit: int = DEFAULTS.s3_bulkhead_limit
-) -> tuple[DocumentStore, Sleeps]:
-    sleeps = Sleeps()
-    store = DocumentStore(
-        client,
-        bucket,
-        ThreadPoolExecutor(max_workers=DEFAULTS.s3_threads),
-        Bulkhead(limit, wait_timeout=0.05),
-        POLICY,
-        sleeps,
-        random.Random(1),
-    )
-    return store, sleeps
-
-
-@pytest.fixture
-def bucket() -> Iterator[str]:
-    # every test gets its own bucket, bucket names allow only lowercase letters and digits here
-    name = f"searchtest{uuid.uuid4().hex[:12]}"
-    admin = moto_client()
-    admin.create_bucket(Bucket=name)
-    yield name
-    for page in admin.get_paginator("list_objects_v2").paginate(Bucket=name):
-        for item in page.get("Contents", []):
-            admin.delete_object(Bucket=name, Key=item["Key"])
-    admin.delete_bucket(Bucket=name)
 
 
 @pytest.fixture
@@ -164,7 +103,7 @@ async def test_two_writers_of_the_same_content_get_created_and_already_there(
 async def test_as_many_parallel_writes_as_the_bulkhead_allows_all_succeed(
     store: tuple[DocumentStore, Sleeps], bucket: str
 ) -> None:
-    prepared = [prepare_upsert(request(f"P{n}"), NOW) for n in range(DEFAULTS.s3_bulkhead_limit)]
+    prepared = [prepare_upsert(request(f"P{n}"), NOW) for n in range(S3_BULKHEAD_LIMIT)]
     results = await asyncio.gather(
         *(store[0].put_if_absent(p.key, p.data, p.content_sha) for p in prepared)
     )

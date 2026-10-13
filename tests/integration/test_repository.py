@@ -4,7 +4,6 @@ import asyncio
 import json
 import random
 import time
-from typing import Any
 
 import psycopg
 import pytest
@@ -14,7 +13,7 @@ from libs.db.pool import create_pool
 from services.ingest.repository import AcceptResult, DocumentRepository, Outcome, Outgoing
 from services.ingest.rules import KnownDocument
 
-from .conftest import APP_POOL_SIZE, Database
+from .conftest import APP_POOL_SIZE, Database, document, outbox
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
@@ -36,29 +35,6 @@ async def accept(
     return await DocumentRepository(pool).accept(
         corpus, doc_id, version, sha, outgoing(doc_id, version)
     )
-
-
-def document(dsn: str, doc_id: str) -> dict[str, Any] | None:
-    with psycopg.connect(dsn) as conn:
-        row = conn.execute(
-            "select latest_version, latest_content_sha, current_version, indexed_version, deleted, "
-            "created_at, updated_at from documents where corpus = 'esci' and doc_id = %s",
-            (doc_id,),
-        ).fetchone()
-    if row is None:
-        return None
-    names = ["latest", "sha", "current", "indexed", "deleted", "created_at", "updated_at"]
-    return dict(zip(names, row, strict=True))
-
-
-OUTBOX_COLUMNS = "select id, doc_id, request_id, event_schema, payload, published_at from outbox"
-
-
-def outbox(dsn: str, doc_id: str | None = None) -> list[tuple[Any, ...]]:
-    with psycopg.connect(dsn) as conn:
-        if doc_id is None:
-            return conn.execute(OUTBOX_COLUMNS + " order by id").fetchall()
-        return conn.execute(OUTBOX_COLUMNS + " where doc_id = %s order by id", (doc_id,)).fetchall()
 
 
 # the compare and set: first write wins, the rest are judged against the committed row
