@@ -2,7 +2,7 @@
 COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 UV := uv run
 
-.PHONY: help setup up down topics test test-integration test-spark lint typecheck eval bench chaos deploy data
+.PHONY: help setup up down topics init test test-integration test-spark lint typecheck eval bench chaos deploy data
 
 help:            ## list targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-18s %s\n",$$1,$$2}'
@@ -19,6 +19,9 @@ down:            ## stop and delete local stack volumes
 topics:          ## create the Kafka topics (doc.events with 24 partitions, and its dead letter topic)
 	$(COMPOSE) exec -T redpanda sh -c 'rpk topic describe doc.events >/dev/null 2>&1 || rpk topic create doc.events -p 24 -r 1'
 	$(COMPOSE) exec -T redpanda sh -c 'rpk topic describe doc.events.dlq >/dev/null 2>&1 || rpk topic create doc.events.dlq -p 24 -r 1'
+
+init: up topics  ## one command from nothing to a usable dev stack, safe to repeat
+	$(UV) python scripts/dev_init.py
 
 lint:            ## ruff
 	$(UV) ruff check . && $(UV) ruff format --check .
