@@ -103,11 +103,13 @@ class OnnxEmbedder:
         if not texts:
             return []
         deadline = time.monotonic() + timeout_s
-        # sort by how many tokens each text has, a text here is a whole chunk of many tokens,
-        # titles and bullets and descriptions, from about ten tokens up to the model limit,
-        # and not a single token, a batch is padded to its longest text, so a ten token text
-        # next to a four hundred token one wastes almost four hundred padded positions, and
-        # texts of similar length together waste few
+        # sort on the number of tokens per text, shortest first
+        # a text here is a whole chunk of many tokens, titles and bullets and descriptions, from
+        # about ten tokens up to the model limit, not a single token
+        # the model pads every text in a batch to the longest one in that batch, so a ten token
+        # text and a four hundred token text placed side by side are both padded to four hundred,
+        # and the short one carries about three hundred and ninety positions of pure padding
+        # in ascending order texts of similar length land in the same batch and little is wasted
         order = sorted(range(len(texts)), key=lambda i: len(self.tokenizer.spans(texts[i])))
         results: dict[int, Embedding] = {}
         loop = asyncio.get_running_loop()
