@@ -16,6 +16,13 @@ class DependencyUnavailable(Exception):
     """A circuit breaker is open: the dependency is down, not this one message."""
 
 
+# pause and stall both hold the partition, commit no offset and retry later with a capped backoff
+# they stay two verdicts because the cause differs and the alert, the metric and the log line
+# should say which one it was, a granular error is easier to act on than one catch all
+# pause: a dependency is known to be down, an open breaker, so the message is not even tried and
+# no attempt is used up, it resumes when the breaker lets a probe through
+# stall: this message was tried and its retries ran out, or its dead letter record could not be
+# written, so the trouble is on the path of the message and not a known outage
 class Verdict(StrEnum):
     RETRY = "retry"
     DEAD_LETTER = "dead_letter"
