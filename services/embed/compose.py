@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
+from libs.resilience.retry import PermanentError
 from libs.schemas import UpsertRequest
 from libs.schemas.hashing import content_sha
 
@@ -16,7 +17,7 @@ class Tokenizer(Protocol):
         ...
 
 
-class ComposeError(ValueError):
+class ComposeError(PermanentError):
     """The product cannot be turned into chunks; retrying will not help (a permanent error)."""
 
 

@@ -13,7 +13,7 @@ from libs.resilience.bulkhead import Overloaded
 from libs.schemas import UpsertRequest
 from libs.schemas.hashing import content_sha
 from services.ingest.events import prepare_upsert
-from services.ingest.storage import DocumentStore, PutResult, StorageUnavailable
+from services.ingest.storage import DocumentStore, MissingObject, PutResult, StorageUnavailable
 
 from .conftest import POLICY, S3_BULKHEAD_LIMIT, Sleeps, make_store, moto_client
 
@@ -180,3 +180,30 @@ async def test_a_slow_write_fills_the_bulkhead_and_the_next_caller_is_shed(bucke
     finally:
         blocking.release.set()
         store.close()
+
+
+async def test_a_stored_document_is_read_back_byte_for_byte(
+    store: tuple[DocumentStore, Sleeps],
+) -> None:
+    prepared = prepare_upsert(request(title="Ergonomic Mouse"), NOW)
+    await store[0].put_if_absent(prepared.key, prepared.data, prepared.content_sha)
+    data = await store[0].get(prepared.key)
+    assert data == prepared.data
+    assert content_sha(data) == prepared.content_sha
+
+
+async def test_a_key_that_was_never_written_is_a_missing_object(
+    store: tuple[DocumentStore, Sleeps],
+) -> None:
+    with pytest.raises(MissingObject):
+        await store[0].get("esci/NOPE/v1.json")
+    assert store[1].delays == []  # not retried
+
+
+async def test_reading_from_a_bucket_that_does_not_exist_is_not_a_missing_document() -> None:
+    created = make_store(moto_client(), f"no-such-bucket-{uuid.uuid4().hex[:8]}")
+    try:
+        with pytest.raises(StorageUnavailable):
+            await created[0].get("esci/D1/v1.json")
+    finally:
+        created[0].close()

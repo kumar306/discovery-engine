@@ -25,6 +25,7 @@ from libs.schemas.hashing import content_sha
 from services.ingest.settings import IngestSettings
 from services.ingest.storage import (
     DocumentStore,
+    MissingObject,
     PutResult,
     StorageUnavailable,
     build_store,
@@ -66,6 +67,8 @@ class StubS3:
 
     def get_object(self, **kwargs: Any) -> dict[str, Any]:
         self.get_calls += 1
+        self.entered.set()
+        self.release.wait(timeout=5)
         outcome = self.gets[min(self.get_calls - 1, len(self.gets) - 1)]
         if isinstance(outcome, BaseException):
             raise outcome
@@ -220,6 +223,76 @@ async def test_every_write_asks_for_if_none_match_so_nothing_is_overwritten(
     store, _ = make_store(client)
     await store.put_if_absent("k", DATA, "sha")
     assert all(call["IfNoneMatch"] == "*" for call in client.put_calls)
+
+
+# reading: the worker fetches the document an event points at
+
+
+async def test_a_document_is_read_back_whole(make_store: Any) -> None:
+    client = StubS3([None], gets=[DATA])
+    store, sleeps = make_store(client)
+    assert await store.get("esci/D1/v1.json") == DATA
+    assert (client.get_calls, sleeps.delays) == (1, [])
+
+
+async def test_a_read_that_fails_at_first_is_retried_then_works(make_store: Any) -> None:
+    gets = [client_error(500, "InternalError"), client_error(503, "SlowDown"), DATA]
+    client = StubS3([None], gets=gets)
+    store, sleeps = make_store(client)
+    assert await store.get("k") == DATA
+    assert (client.get_calls, len(sleeps.delays)) == (3, 2)
+
+
+async def test_a_read_that_never_clears_is_storage_unavailable_not_a_missing_document(
+    make_store: Any,
+) -> None:
+    client = StubS3([None], gets=[client_error(500, "InternalError")])
+    store, _ = make_store(client)
+    with pytest.raises(StorageUnavailable):
+        await store.get("k")
+    assert client.get_calls == 3
+
+
+async def test_a_key_that_does_not_exist_is_a_permanent_error_and_is_not_retried(
+    make_store: Any,
+) -> None:
+    client = StubS3([None], gets=[client_error(404, "NoSuchKey")])
+    store, sleeps = make_store(client)
+    with pytest.raises(MissingObject) as caught:
+        await store.get("esci/D1/v1.json")
+    assert isinstance(caught.value, PermanentError)
+    assert (client.get_calls, sleeps.delays) == (1, [])
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(client_error(404, "NoSuchBucket"), id="the bucket is missing"),
+        pytest.param(client_error(403, "AccessDenied"), id="access is refused"),
+        pytest.param(client_error(403, "InvalidAccessKeyId"), id="the credentials are wrong"),
+    ],
+)
+async def test_a_setup_problem_is_never_mistaken_for_a_missing_document(
+    make_store: Any, error: ClientError
+) -> None:
+    # one wrong setting would otherwise dead letter every single message
+    client = StubS3([None], gets=[error])
+    store, _ = make_store(client)
+    with pytest.raises(StorageUnavailable):
+        await store.get("k")
+    assert client.get_calls == 1  # a permanent boto error is not retried either
+
+
+async def test_a_read_goes_through_the_bulkhead_too(make_store: Any) -> None:
+    client = StubS3([None], gets=[DATA])
+    client.release.clear()  # the first read will sit inside its worker thread
+    store, _ = make_store(client, limit=1, wait=0.05)
+    first = asyncio.create_task(store.get("a"))
+    await asyncio.to_thread(client.entered.wait, 5)
+    with pytest.raises(Overloaded):
+        await store.get("b")
+    client.release.set()
+    assert await first == DATA
 
 
 # shedding

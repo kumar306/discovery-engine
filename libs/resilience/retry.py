@@ -43,13 +43,24 @@ def decide(error: Exception, attempt: int, max_attempts: int) -> Verdict:
     # an open breaker says the dependency is down, so never dead letter the message for it
     if isinstance(error, DependencyUnavailable):
         return Verdict.PAUSE
-    # bad input stays bad, ValueError covers pydantic validation, json and compose errors
-    if isinstance(error, PermanentError | ValueError):
+    # only an error marked permanent is the fault of the message, bad input stays bad
+    # a bare ValueError is not trusted, it is as likely a bug of ours, examples we get are
+    # int("abc"), uuid.UUID("not a uuid"), a pydantic ValidationError for a missing field, a
+    # json.JSONDecodeError for a truncated file, and our own guard ValueError("a version with
+    # no live chunks cannot be published")
+    # the pipeline turns the known bad input ones into PermanentError where it parses a message
+    # and everything else gets the retries and then the stall, so a bug of ours raises an alert
+    # and does not push good messages into the dead letter queue
+    if isinstance(error, PermanentError):
         return Verdict.DEAD_LETTER
-    # timeouts, 5xx and anything unknown get the bounded retries, then the dead letter queue
+    # timeouts, 5xx and anything unknown get the bounded retries
     if attempt < max_attempts:
         return Verdict.RETRY
-    return Verdict.DEAD_LETTER
+    # the retries are used up and nothing says the message itself is bad, so the dependency or
+    # the machine is the problem and the message stays where it is, the partition stalls and
+    # alerts, moving a perfectly good message to the dead letter queue because something was
+    # briefly unhealthy is an anti pattern, the message is fine and would need a manual replay
+    return Verdict.STALL
 
 
 def after_dead_letter(published: bool) -> Verdict:

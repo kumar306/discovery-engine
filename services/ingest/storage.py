@@ -49,6 +49,10 @@ class StorageUnavailable(Exception):
     """S3 failed after the retries, or failed in a way a retry cannot fix: the api answers 503."""
 
 
+class MissingObject(PermanentError):
+    """The event points at an object that is not in the bucket, no retry makes it appear."""
+
+
 def classify(error: ClientError | BotoCoreError) -> TransientError | PermanentError:
     if isinstance(error, ClientError):
         code = error.response.get("Error", {}).get("Code", "")
@@ -64,6 +68,15 @@ def classify(error: ClientError | BotoCoreError) -> TransientError | PermanentEr
 
 def _precondition_failed(error: ClientError) -> bool:
     return error.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 412
+
+
+def _is_missing_object(error: Exception) -> bool:
+    # classify wrapped the boto error and the original is the cause, only no such key means
+    # the document is missing, a missing bucket or a refused access is a setup problem and
+    # not a fault of the message
+    cause = error.__cause__
+    code = cause.response.get("Error", {}).get("Code") if isinstance(cause, ClientError) else None
+    return code == "NoSuchKey"
 
 
 class DocumentStore:
@@ -114,6 +127,24 @@ class DocumentStore:
                     self._rng,
                 )
             except Rejected as rejected:
+                raise StorageUnavailable(str(rejected)) from rejected.error
+
+    async def get(self, key: str) -> bytes:
+        loop = asyncio.get_running_loop()
+        # the same bulkhead and retries as a write, one permit covers the call and its retries
+        async with self._bulkhead:
+            try:
+                return await call_with_retries(
+                    lambda: loop.run_in_executor(self._executor, self._read_blocking, key),
+                    self._policy,
+                    self._sleep,
+                    self._rng,
+                )
+            except Rejected as rejected:
+                # a document that is not there is the fault of the message and is dead lettered
+                # anything else, an outage, a refused access, a missing bucket, is not
+                if _is_missing_object(rejected.error):
+                    raise MissingObject(key) from rejected.error
                 raise StorageUnavailable(str(rejected)) from rejected.error
 
     def close(self) -> None:

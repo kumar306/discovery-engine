@@ -33,7 +33,7 @@ def a_validation_error() -> ValidationError:
     return exc_info.value
 
 
-class BreakerAndBadInput(DependencyUnavailable, ValueError):
+class BreakerAndBadInput(DependencyUnavailable, PermanentError):
     """Both at once, to show that an open breaker wins."""
 
 
@@ -49,9 +49,11 @@ class BreakerAndBadInput(DependencyUnavailable, ValueError):
         pytest.param(OSError("disk"), Verdict.RETRY, id="other os error"),
         pytest.param(RuntimeError("boom"), Verdict.RETRY, id="unknown errors get the retries"),
         pytest.param(PermanentError("bad"), Verdict.DEAD_LETTER, id="marked permanent"),
-        pytest.param(a_validation_error(), Verdict.DEAD_LETTER, id="schema validation failed"),
         pytest.param(ComposeError("header too big"), Verdict.DEAD_LETTER, id="cannot compose"),
-        pytest.param(json.JSONDecodeError("bad", "{", 0), Verdict.DEAD_LETTER, id="undecodable"),
+        # a bare value error is not trusted as the fault of the message, it may be our own bug
+        pytest.param(a_validation_error(), Verdict.RETRY, id="bare validation error"),
+        pytest.param(json.JSONDecodeError("bad", "{", 0), Verdict.RETRY, id="bare decode error"),
+        pytest.param(ValueError("our own guard"), Verdict.RETRY, id="bare value error"),
         pytest.param(DependencyUnavailable("breaker open"), Verdict.PAUSE, id="breaker open"),
         pytest.param(BreakerAndBadInput("both"), Verdict.PAUSE, id="breaker wins over bad input"),
     ],
@@ -62,9 +64,9 @@ def test_first_attempt_verdict(error: Exception, expected: Verdict) -> None:
 
 @pytest.mark.parametrize(
     ("attempt", "expected"),
-    [(1, Verdict.RETRY), (2, Verdict.RETRY), (3, Verdict.DEAD_LETTER), (4, Verdict.DEAD_LETTER)],
+    [(1, Verdict.RETRY), (2, Verdict.RETRY), (3, Verdict.STALL), (4, Verdict.STALL)],
 )
-def test_a_transient_error_is_retried_until_the_attempts_run_out(
+def test_a_transient_error_is_retried_until_the_attempts_run_out_and_then_stalls(
     attempt: int, expected: Verdict
 ) -> None:
     assert decide(TimeoutError(), attempt=attempt, max_attempts=3) is expected
@@ -85,10 +87,30 @@ def test_the_offset_is_committed_only_after_the_dead_letter_record_is_written() 
 
 
 @given(st.integers(min_value=1, max_value=10))
-def test_decide_never_commits_or_stalls_on_its_own(attempt: int) -> None:
+def test_decide_never_commits_on_its_own(attempt: int) -> None:
     errors = [TimeoutError(), PermanentError("x"), DependencyUnavailable("x"), RuntimeError("x")]
     verdicts = {decide(error, attempt, 3) for error in errors}
-    assert verdicts <= {Verdict.RETRY, Verdict.DEAD_LETTER, Verdict.PAUSE}
+    assert verdicts <= {Verdict.RETRY, Verdict.DEAD_LETTER, Verdict.PAUSE, Verdict.STALL}
+
+
+@given(st.integers(min_value=1, max_value=10))
+def test_only_the_messages_own_faults_are_ever_dead_lettered(attempt: int) -> None:
+    # a perfectly good message is never moved to the dead letter queue because a dependency
+    # or the machine was unhealthy, however many attempts were used up
+    unhealthy = [
+        TransientError("busy"),
+        TimeoutError(),
+        ConnectionResetError(),
+        OSError("disk"),
+        RuntimeError("boom"),
+        DependencyUnavailable("down"),
+        ValueError("a bug of ours"),
+        a_validation_error(),
+        json.JSONDecodeError("b", "{", 0),
+    ]
+    assert all(decide(error, attempt, 3) is not Verdict.DEAD_LETTER for error in unhealthy)
+    bad_message = [PermanentError("x"), ComposeError("x")]
+    assert all(decide(error, attempt, 3) is Verdict.DEAD_LETTER for error in bad_message)
 
 
 # 26. backoff: exponential ceiling with full jitter
@@ -163,11 +185,13 @@ async def test_transient_errors_are_retried_with_growing_waits() -> None:
     assert sleeps.delays == [0.1, 0.2]
 
 
-async def test_a_transient_error_that_never_clears_is_dead_lettered_after_three_attempts() -> None:
+async def test_a_transient_error_that_never_clears_stalls_the_partition_after_three_attempts() -> (
+    None
+):
     operation, sleeps = Scripted(TimeoutError("slow")), Sleeps()
     with pytest.raises(Rejected) as exc_info:
         await call_with_retries(operation, POLICY, sleeps, MaxRandom())
-    assert exc_info.value.verdict is Verdict.DEAD_LETTER
+    assert exc_info.value.verdict is Verdict.STALL
     assert exc_info.value.attempts == 3
     assert operation.calls == 3
     assert len(sleeps.delays) == 2  # no wait after the last attempt
