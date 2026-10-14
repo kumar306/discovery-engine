@@ -1,0 +1,178 @@
+from collections.abc import Sequence
+from enum import StrEnum
+from typing import Protocol
+from uuid import UUID
+
+from pydantic import ValidationError
+
+from libs.resilience.retry import PermanentError
+from libs.schemas import DocEvent, UpsertEvent, UpsertRequest
+from libs.schemas.hashing import chunk_id, content_sha
+from services.embed.compose import Chunk, compose
+from services.embed.diff import diff_chunks
+from services.embed.embedder import Embedder
+from services.embed.gate import GateDecision, GateState, gate
+from services.embed.qdrant import ChunkPayload, IndexedChunk, LiveChunk
+from services.embed.repository import CommitOutcome, NewChunk, Snapshot
+from services.embed.settings import EmbedSettings
+
+
+class Outcome(StrEnum):
+    # the event was applied, and the document is live in the version it carried
+    DONE = "done"
+    # the event was stale or a duplicate, nothing was changed, and that is a normal answer
+    DROPPED = "dropped"
+
+
+# the four things the pipeline talks to, as the small surfaces it uses, so a test can put a
+# recorder between the pipeline and the real thing and see every call in order
+class ChunkStore(Protocol):
+    async def gate_state(self, corpus: str, doc_id: str) -> GateState | None: ...
+    async def snapshot(self, corpus: str, doc_id: str) -> Snapshot: ...
+    async def commit_version(
+        self, corpus: str, doc_id: str, version: int, chunks: Sequence[NewChunk]
+    ) -> CommitOutcome: ...
+    async def commit_delete(self, corpus: str, doc_id: str, version: int) -> CommitOutcome: ...
+    async def mark_indexed(self, corpus: str, doc_id: str, version: int) -> bool: ...
+
+
+class VectorIndex(Protocol):
+    async def stage(self, chunks: Sequence[IndexedChunk]) -> None: ...
+    async def publish(
+        self, version: int, live: Sequence[LiveChunk], superseded: Sequence[UUID]
+    ) -> None: ...
+    async def mark_deleted(self, doc_id: str) -> None: ...
+
+
+class DocumentReader(Protocol):
+    async def get(self, key: str) -> bytes: ...
+
+
+class Pipeline:
+    def __init__(
+        self,
+        chunks: ChunkStore,
+        index: VectorIndex,
+        documents: DocumentReader,
+        embedder: Embedder,
+        settings: EmbedSettings,
+    ) -> None:
+        self._chunks = chunks
+        self._index = index
+        self._documents = documents
+        self._embedder = embedder
+        self._settings = settings
+
+    async def handle(self, event: DocEvent) -> Outcome:
+        """Apply one event, every step is safe to run again, an error means nothing committed."""
+        if isinstance(event, UpsertEvent):
+            return await self._upsert(event)
+        return await self._delete(event.corpus, event.doc_id, event.version)
+
+    async def _upsert(self, event: UpsertEvent) -> Outcome:
+        # the gate, nothing is read or computed for an event that is stale or already applied
+        if await self._is_stale(event.corpus, event.doc_id, event.version):
+            return Outcome.DROPPED
+        # read the document and turn it into chunks, still nothing has changed anywhere
+        product = await self._read(event)
+        chunks = compose(product, self._embedder.tokenizer, self._embedder.limits)
+        by_id = {
+            chunk_id(event.doc_id, self._settings.model_version, chunk.content_hash): chunk
+            for chunk in chunks
+        }
+        # what changed against the committed chunks decides what is embedded, and only that
+        snapshot = await self._chunks.snapshot(event.corpus, event.doc_id)
+        diff = diff_chunks(
+            {cid: chunk.positions for cid, chunk in by_id.items()},
+            snapshot.current,
+            snapshot.stale,
+        )
+        # staged points are invisible to every search, so a crash from here to the commit
+        # leaves the old version fully visible
+        await self._stage(event, product, [(cid, by_id[cid]) for cid in diff.misses])
+        # the commit, the moment the new version officially exists, judged again under the lock
+        committed = await self._chunks.commit_version(
+            event.corpus,
+            event.doc_id,
+            event.version,
+            [NewChunk(cid, chunk.content_hash, chunk.positions) for cid, chunk in by_id.items()],
+        )
+        if committed is CommitOutcome.STALE:
+            return Outcome.DROPPED
+        await self._publish(event.corpus, event.doc_id, event.version)
+        return Outcome.DONE
+
+    async def _delete(self, corpus: str, doc_id: str, version: int) -> Outcome:
+        if await self._is_stale(corpus, doc_id, version):
+            return Outcome.DROPPED
+        if await self._chunks.commit_delete(corpus, doc_id, version) is CommitOutcome.STALE:
+            return Outcome.DROPPED
+        # the tombstone is committed, now every point of the product goes invisible at once
+        await self._index.mark_deleted(doc_id)
+        await self._chunks.mark_indexed(corpus, doc_id, version)
+        return Outcome.DONE
+
+    async def _is_stale(self, corpus: str, doc_id: str, version: int) -> bool:
+        state = await self._chunks.gate_state(corpus, doc_id)
+        return gate(version, state) is GateDecision.DROP
+
+    async def _read(self, event: UpsertEvent) -> UpsertRequest:
+        data = await self._documents.get(event.s3_key)
+        if content_sha(data) != event.content_sha:
+            raise PermanentError(f"{event.s3_key} does not match the sha in its event")
+        try:
+            product = UpsertRequest.model_validate_json(data)
+        except ValidationError as error:
+            # the message is not echoed, a stored document may hold anything
+            raise PermanentError(
+                f"{event.s3_key} is not a valid document, {error.error_count()} problem(s)"
+            ) from error
+        if (product.corpus, product.doc_id, product.version) != (
+            event.corpus,
+            event.doc_id,
+            event.version,
+        ):
+            raise PermanentError(f"{event.s3_key} holds another document than its event names")
+        return product
+
+    async def _stage(
+        self, event: UpsertEvent, product: UpsertRequest, misses: list[tuple[UUID, Chunk]]
+    ) -> None:
+        if not misses:
+            return
+        embeddings = await self._embedder.embed(
+            [chunk.text for _, chunk in misses], self._settings.embed_timeout_s
+        )
+        await self._index.stage(
+            [
+                IndexedChunk(
+                    cid,
+                    embedding.dense,
+                    embedding.sparse_indices,
+                    embedding.sparse_values,
+                    ChunkPayload(
+                        doc_id=event.doc_id,
+                        version=event.version,
+                        chunk_idx=chunk.positions[0],
+                        content_hash=chunk.content_hash,
+                        model_version=self._settings.model_version,
+                        locale=product.locale,
+                        text=chunk.text,
+                        brand=product.brand,
+                        color=product.color,
+                    ),
+                )
+                for (cid, chunk), embedding in zip(misses, embeddings, strict=True)
+            ]
+        )
+
+    async def _publish(self, corpus: str, doc_id: str, version: int) -> None:
+        # what goes live is read back from postgres, the record of what was committed, and not
+        # taken from memory, so a replay after a crash publishes exactly the committed chunks
+        snapshot = await self._chunks.snapshot(corpus, doc_id)
+        live = [
+            LiveChunk(cid, positions[0])
+            for cid, positions in sorted(snapshot.current.items(), key=lambda item: item[1][0])
+        ]
+        await self._index.publish(version, live, sorted(snapshot.stale))
+        await self._chunks.mark_indexed(corpus, doc_id, version)
