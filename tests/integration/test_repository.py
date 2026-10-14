@@ -13,7 +13,7 @@ from libs.db.pool import create_pool
 from services.ingest.repository import AcceptResult, DocumentRepository, Outcome, Outgoing
 from services.ingest.rules import KnownDocument
 
-from .conftest import APP_POOL_SIZE, Database, document, outbox
+from .conftest import APP_POOL_SIZE, Database, document, outbox, wait_until_a_writer_is_blocked
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
@@ -206,22 +206,6 @@ async def test_two_identical_writers_get_one_event_and_both_succeed(
         a, b = await asyncio.gather(accept(pool, doc_id, 6), accept(pool, doc_id, 6))
         assert sorted([a.outcome, b.outcome]) == sorted([ACCEPTED, DUPLICATE])
         assert len(outbox(db.direct_dsn, doc_id)) == 1
-
-
-async def wait_until_a_writer_is_blocked(dsn: str, give_up_after: float = 5.0) -> None:
-    deadline = time.monotonic() + give_up_after
-    async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
-        while time.monotonic() < deadline:
-            row = await (
-                await conn.execute(
-                    "select count(*) from pg_stat_activity "
-                    "where datname = current_database() and wait_event_type = 'Lock'"
-                )
-            ).fetchone()
-            if row is not None and row[0] >= 1:
-                return
-            await asyncio.sleep(0.02)
-    raise TimeoutError("no writer ever waited on the row lock")
 
 
 @pytest.mark.parametrize(

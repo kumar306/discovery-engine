@@ -160,3 +160,106 @@ def test_a_new_outbox_row_is_unpublished_and_needs_a_payload(db: Database) -> No
     )
     with pytest.raises(psycopg.errors.NotNullViolation), psycopg.connect(db.direct_dsn) as conn:
         conn.execute(without_payload)
+
+
+# the chunk tables of the second migration
+
+CHUNK_COLUMNS = {
+    "corpus": ("text", "NO"),
+    "doc_id": ("text", "NO"),
+    "chunk_id": ("uuid", "NO"),
+    "content_hash": ("text", "NO"),
+    "positions": ("ARRAY", "NO"),
+}
+
+STALE_COLUMNS = {
+    "corpus": ("text", "NO"),
+    "doc_id": ("text", "NO"),
+    "chunk_id": ("uuid", "NO"),
+    "stale_at": ("timestamp with time zone", "NO"),
+}
+
+CHUNK_ID = "00000000-0000-0000-0000-000000000001"
+
+ADD_CHUNK = (
+    "insert into chunks (corpus, doc_id, chunk_id, content_hash, positions) "
+    "values (%s, %s, %s, %s, %s::int[])"
+)
+
+
+def test_chunks_has_the_expected_columns_and_key(migrated_database: Database) -> None:
+    assert columns(migrated_database.direct_dsn, "chunks") == CHUNK_COLUMNS
+    assert primary_key(migrated_database.direct_dsn, "chunks") == ["corpus", "doc_id", "chunk_id"]
+
+
+def test_stale_chunks_has_the_expected_columns_and_key(migrated_database: Database) -> None:
+    assert columns(migrated_database.direct_dsn, "stale_chunks") == STALE_COLUMNS
+    assert primary_key(migrated_database.direct_dsn, "stale_chunks") == [
+        "corpus",
+        "doc_id",
+        "chunk_id",
+    ]
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        pytest.param(("esci", "D1", CHUNK_ID, SHA, [0]), id="one position"),
+        pytest.param(("esci", "D1", CHUNK_ID, SHA, [0, 3, 7]), id="a text that repeats"),
+    ],
+)
+def test_valid_chunks_are_accepted(db: Database, row: tuple[Any, ...]) -> None:
+    insert_document(db.direct_dsn)
+    with psycopg.connect(db.direct_dsn) as conn:
+        conn.execute(ADD_CHUNK, row)
+
+
+@pytest.mark.parametrize(
+    ("row", "error"),
+    [
+        pytest.param(
+            ("esci", "D1", CHUNK_ID, SHA, []), psycopg.errors.CheckViolation, id="no position"
+        ),
+        pytest.param(
+            ("esci", "D1", CHUNK_ID, SHA, [0, -1]),
+            psycopg.errors.CheckViolation,
+            id="a negative position",
+        ),
+        pytest.param(
+            ("esci", "D1", CHUNK_ID, "not a hash", [0]),
+            psycopg.errors.CheckViolation,
+            id="a content hash that is not a sha256",
+        ),
+        pytest.param(
+            ("esci", "GHOST", CHUNK_ID, SHA, [0]),
+            psycopg.errors.ForeignKeyViolation,
+            id="a chunk of a document that does not exist",
+        ),
+    ],
+)
+def test_impossible_chunks_are_refused_by_the_database(
+    db: Database, row: tuple[Any, ...], error: type[Exception]
+) -> None:
+    insert_document(db.direct_dsn)
+    with pytest.raises(error), psycopg.connect(db.direct_dsn) as conn:
+        conn.execute(ADD_CHUNK, row)
+
+
+def test_a_chunk_exists_once_per_document(db: Database) -> None:
+    insert_document(db.direct_dsn)
+    row = ("esci", "D1", CHUNK_ID, SHA, [0])
+    with psycopg.connect(db.direct_dsn) as conn:
+        conn.execute(ADD_CHUNK, row)
+    with pytest.raises(psycopg.errors.UniqueViolation), psycopg.connect(db.direct_dsn) as conn:
+        conn.execute(ADD_CHUNK, row)
+
+
+def test_a_stale_chunk_needs_a_document_and_is_queued_once(db: Database) -> None:
+    add = "insert into stale_chunks (corpus, doc_id, chunk_id) values ('esci', %s, %s)"
+    with pytest.raises(psycopg.errors.ForeignKeyViolation), psycopg.connect(db.direct_dsn) as conn:
+        conn.execute(add, ("GHOST", CHUNK_ID))
+    insert_document(db.direct_dsn)
+    with psycopg.connect(db.direct_dsn) as conn:
+        conn.execute(add, ("D1", CHUNK_ID))
+    with pytest.raises(psycopg.errors.UniqueViolation), psycopg.connect(db.direct_dsn) as conn:
+        conn.execute(add, ("D1", CHUNK_ID))

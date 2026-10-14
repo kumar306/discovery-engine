@@ -98,7 +98,7 @@ def migrated_database() -> Iterator[Database]:
 def db(migrated_database: Database) -> Database:
     # the relay claims any unpublished row, so every test starts from empty tables
     with psycopg.connect(migrated_database.direct_dsn, autocommit=True) as conn:
-        conn.execute("truncate documents, outbox restart identity")
+        conn.execute("truncate documents, outbox, chunks, stale_chunks restart identity")
     return migrated_database
 
 
@@ -175,6 +175,22 @@ def bucket() -> Iterator[str]:
         for item in page.get("Contents", []):
             admin.delete_object(Bucket=name, Key=item["Key"])
     admin.delete_bucket(Bucket=name)
+
+
+async def wait_until_a_writer_is_blocked(dsn: str, give_up_after: float = 5.0) -> None:
+    deadline = time.monotonic() + give_up_after
+    async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+        while time.monotonic() < deadline:
+            row = await (
+                await conn.execute(
+                    "select count(*) from pg_stat_activity "
+                    "where datname = current_database() and wait_event_type = 'Lock'"
+                )
+            ).fetchone()
+            if row is not None and row[0] >= 1:
+                return
+            await asyncio.sleep(0.02)
+    raise TimeoutError("no writer ever waited on the row lock")
 
 
 def document(dsn: str, doc_id: str) -> dict[str, Any] | None:
