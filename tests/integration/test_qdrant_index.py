@@ -120,7 +120,7 @@ async def test_a_missing_collection_is_refused_with_the_fix_in_the_message(
     ("change", "complaint"),
     [
         pytest.param({"dense_dim": TEST_DIM * 2}, "dense size is 4, expected 8", id="size"),
-        pytest.param({"model_version": "other_model_1"}, "model_version is", id="model version"),
+        pytest.param({"model_revision": 2}, "model_version is", id="model version"),
     ],
 )
 async def test_a_collection_for_another_model_is_refused_and_left_alone(

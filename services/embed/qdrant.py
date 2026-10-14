@@ -189,6 +189,10 @@ async def ensure_collection(client: AsyncQdrantClient, settings: EmbedSettings) 
     return False
 
 
+# at worker startup: the worker has its model version baked into the settings property, built
+# from the model name, the bm25 length and the revision, and this compares it with the one
+# stored in the collection, so a worker for another model refuses to start
+# the collection may not exist yet, that is flagged here too, with the fix in the message
 async def verify_collection(client: AsyncQdrantClient, settings: EmbedSettings) -> None:
     name = settings.qdrant_collection
     if not await client.collection_exists(name):
