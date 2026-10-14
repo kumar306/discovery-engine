@@ -28,12 +28,15 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 from psycopg import sql
 from psycopg_pool import AsyncConnectionPool
+from qdrant_client import AsyncQdrantClient, QdrantClient, models
 
 from libs.db.migrate import migrate
 from libs.db.pool import create_pool
 from libs.resilience.bulkhead import Bulkhead
 from libs.resilience.retry import RetryPolicy
 from libs.schemas import UpsertRequest, doc_event_adapter
+from services.embed.qdrant import ensure_collection
+from services.embed.settings import EmbedSettings
 from services.ingest.app import create_app
 from services.ingest.repository import DocumentRepository
 from services.ingest.service import IngestService
@@ -369,3 +372,73 @@ def add_events(
             assert row is not None
             ids.append(row[0])
     return ids
+
+
+# qdrant: every test gets its own collection, with tiny dense vectors, and it is dropped afterwards
+TEST_DIM = 4
+
+
+@pytest.fixture
+async def qdrant() -> AsyncIterator[AsyncQdrantClient]:
+    client = AsyncQdrantClient(url=EmbedSettings().qdrant_url, timeout=10)
+    try:
+        yield client
+    finally:
+        await client.close()
+
+
+@pytest.fixture(scope="session")
+def shared_collection() -> Iterator[EmbedSettings]:
+    # creating a collection and its indexes takes seconds, so one serves the whole session and
+    # every test starts by wiping its points, the tests that need a differently shaped one build it
+    settings = EmbedSettings(
+        qdrant_collection=f"search_test_{uuid.uuid4().hex[:10]}", dense_dim=TEST_DIM
+    )
+
+    async def create() -> None:
+        client = AsyncQdrantClient(url=settings.qdrant_url, timeout=10)
+        try:
+            await ensure_collection(client, settings)
+        finally:
+            await client.close()
+
+    asyncio.run(create())
+    try:
+        yield settings
+    finally:
+        sync = QdrantClient(url=settings.qdrant_url, timeout=10)
+        with suppress(Exception):
+            sync.delete_collection(settings.qdrant_collection)
+        sync.close()
+
+
+@pytest.fixture
+async def collection(qdrant: AsyncQdrantClient, shared_collection: EmbedSettings) -> EmbedSettings:
+    # an empty filter matches every point
+    await qdrant.delete(
+        shared_collection.qdrant_collection,
+        points_selector=models.FilterSelector(filter=models.Filter()),
+        wait=True,
+    )
+    return shared_collection
+
+
+async def read_points(
+    client: AsyncQdrantClient, name: str, doc_id: str | None = None
+) -> dict[uuid.UUID, dict[str, Any]]:
+    """Every point of the collection (or of one product) with its payload, keyed by id."""
+    where = None
+    if doc_id is not None:
+        where = models.Filter(
+            must=[models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id))]
+        )
+    found: dict[uuid.UUID, dict[str, Any]] = {}
+    offset = None
+    while True:
+        points, offset = await client.scroll(
+            name, scroll_filter=where, limit=100, offset=offset, with_payload=True
+        )
+        for point in points:
+            found[uuid.UUID(str(point.id))] = dict(point.payload or {})
+        if offset is None:
+            return found

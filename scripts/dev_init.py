@@ -1,10 +1,14 @@
-"""Bring a fresh dev stack to a usable state: database tables and the S3 bucket, safe to repeat."""
+"""Bring a fresh dev stack to a usable state: tables, bucket and collection, safe to repeat."""
+
+import asyncio
 
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from libs.db.migrate import migrate
+from services.embed.qdrant import ensure_collection, new_client
+from services.embed.settings import EmbedSettings
 from services.ingest.settings import IngestSettings
 
 
@@ -38,12 +42,24 @@ def ensure_bucket(settings: IngestSettings) -> bool:
     return True
 
 
+async def ensure_qdrant_collection(settings: EmbedSettings) -> bool:
+    """Create the collection when it is missing, a wrong existing one raises and stops make init."""
+    client = new_client(settings)
+    try:
+        return await ensure_collection(client, settings)
+    finally:
+        await client.close()
+
+
 def main() -> None:
     settings = IngestSettings()
     applied = migrate(settings.database_dsn)
     print(f"migrations applied: {', '.join(applied) if applied else 'none, already up to date'}")
     created = ensure_bucket(settings)
     print(f"bucket {settings.s3_bucket}: {'created' if created else 'already there'}")
+    embed = EmbedSettings()
+    made = asyncio.run(ensure_qdrant_collection(embed))
+    print(f"collection {embed.qdrant_collection}: {'created' if made else 'already there'}")
 
 
 if __name__ == "__main__":
