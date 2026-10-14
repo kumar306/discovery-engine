@@ -13,14 +13,14 @@ from psycopg_pool import AsyncConnectionPool
 from services.embed.gate import GateState
 from services.embed.repository import (
     ChunkRepository,
-    CommitOutcome,
     MissingDocument,
     NewChunk,
+    PgCommitResult,
 )
 
 from .conftest import Database, document, wait_until_a_writer_is_blocked
 
-COMMITTED, STALE = CommitOutcome.COMMITTED, CommitOutcome.STALE
+COMMITTED, STALE = PgCommitResult.PG_COMMIT_APPLIED, PgCommitResult.PG_COMMIT_SKIPPED_STALE
 
 
 def chunk(number: int, *positions: int) -> NewChunk:
@@ -193,7 +193,7 @@ async def test_the_gate_is_judged_again_under_the_lock(
     current: int | None,
     indexed: int | None,
     version: int,
-    expected: CommitOutcome,
+    expected: PgCommitResult,
 ) -> None:
     seed(db.direct_dsn, current_version=current, indexed_version=indexed)
     outcome = await repo(pool).commit_version("esci", "D1", version, [chunk(7, 0)])
@@ -256,7 +256,7 @@ async def test_a_commit_that_waited_for_the_lock_judges_the_row_the_holder_commi
     pool: AsyncConnectionPool,
     db: Database,
     holder_sql: str,
-    expected: CommitOutcome,
+    expected: PgCommitResult,
     chunks_after: int,
 ) -> None:
     seed(db.direct_dsn)
@@ -374,7 +374,7 @@ async def test_a_newer_upload_after_a_delete_brings_the_document_back(
     ],
 )
 async def test_the_same_delete_delivered_again_follows_the_gate(
-    pool: AsyncConnectionPool, db: Database, indexed: int | None, expected: CommitOutcome
+    pool: AsyncConnectionPool, db: Database, indexed: int | None, expected: PgCommitResult
 ) -> None:
     seed(db.direct_dsn, current_version=2, indexed_version=indexed, deleted=True)
     assert await repo(pool).commit_delete("esci", "D1", 2) == expected

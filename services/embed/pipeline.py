@@ -11,17 +11,17 @@ from libs.schemas.hashing import chunk_id, content_sha
 from services.embed.compose import Chunk, compose
 from services.embed.diff import diff_chunks
 from services.embed.embedder import Embedder
-from services.embed.gate import GateDecision, GateState, gate
+from services.embed.gate import GateState, VersionGateDecision, gate
 from services.embed.qdrant import ChunkPayload, IndexedChunk, LiveChunk
-from services.embed.repository import CommitOutcome, NewChunk, Snapshot
+from services.embed.repository import NewChunk, PgCommitResult, Snapshot
 from services.embed.settings import EmbedSettings
 
 
-class Outcome(StrEnum):
+class KafkaEventResult(StrEnum):
     # the event was applied, and the document is live in the version it carried
-    DONE = "done"
+    KAFKA_EVENT_APPLIED = "done"
     # the event was stale or a duplicate, nothing was changed, and that is a normal answer
-    DROPPED = "dropped"
+    KAFKA_EVENT_SKIPPED = "dropped"
 
 
 # the four things the pipeline talks to, as the small surfaces it uses, so a test can put a
@@ -31,8 +31,8 @@ class ChunkStore(Protocol):
     async def snapshot(self, corpus: str, doc_id: str) -> Snapshot: ...
     async def commit_version(
         self, corpus: str, doc_id: str, version: int, chunks: Sequence[NewChunk]
-    ) -> CommitOutcome: ...
-    async def commit_delete(self, corpus: str, doc_id: str, version: int) -> CommitOutcome: ...
+    ) -> PgCommitResult: ...
+    async def commit_delete(self, corpus: str, doc_id: str, version: int) -> PgCommitResult: ...
     async def mark_indexed(self, corpus: str, doc_id: str, version: int) -> bool: ...
 
 
@@ -63,16 +63,16 @@ class Pipeline:
         self._embedder = embedder
         self._settings = settings
 
-    async def handle(self, event: DocEvent) -> Outcome:
+    async def handle(self, event: DocEvent) -> KafkaEventResult:
         """Apply one event, every step is safe to run again, an error means nothing committed."""
         if isinstance(event, UpsertEvent):
             return await self._upsert(event)
         return await self._delete(event.corpus, event.doc_id, event.version)
 
-    async def _upsert(self, event: UpsertEvent) -> Outcome:
+    async def _upsert(self, event: UpsertEvent) -> KafkaEventResult:
         # the gate, nothing is read or computed for an event that is stale or already applied
         if await self._is_stale(event.corpus, event.doc_id, event.version):
-            return Outcome.DROPPED
+            return KafkaEventResult.KAFKA_EVENT_SKIPPED
         # read the document and turn it into chunks, still nothing has changed anywhere
         product = await self._read(event)
         chunks = compose(product, self._embedder.tokenizer, self._embedder.limits)
@@ -97,24 +97,27 @@ class Pipeline:
             event.version,
             [NewChunk(cid, chunk.content_hash, chunk.positions) for cid, chunk in by_id.items()],
         )
-        if committed is CommitOutcome.STALE:
-            return Outcome.DROPPED
+        if committed is PgCommitResult.PG_COMMIT_SKIPPED_STALE:
+            return KafkaEventResult.KAFKA_EVENT_SKIPPED
         await self._publish(event.corpus, event.doc_id, event.version)
-        return Outcome.DONE
+        return KafkaEventResult.KAFKA_EVENT_APPLIED
 
-    async def _delete(self, corpus: str, doc_id: str, version: int) -> Outcome:
+    async def _delete(self, corpus: str, doc_id: str, version: int) -> KafkaEventResult:
         if await self._is_stale(corpus, doc_id, version):
-            return Outcome.DROPPED
-        if await self._chunks.commit_delete(corpus, doc_id, version) is CommitOutcome.STALE:
-            return Outcome.DROPPED
+            return KafkaEventResult.KAFKA_EVENT_SKIPPED
+        if (
+            await self._chunks.commit_delete(corpus, doc_id, version)
+            is PgCommitResult.PG_COMMIT_SKIPPED_STALE
+        ):
+            return KafkaEventResult.KAFKA_EVENT_SKIPPED
         # the tombstone is committed, now every point of the product goes invisible at once
         await self._index.mark_deleted(doc_id)
         await self._chunks.mark_indexed(corpus, doc_id, version)
-        return Outcome.DONE
+        return KafkaEventResult.KAFKA_EVENT_APPLIED
 
     async def _is_stale(self, corpus: str, doc_id: str, version: int) -> bool:
         state = await self._chunks.gate_state(corpus, doc_id)
-        return gate(version, state) is GateDecision.DROP
+        return gate(version, state) is VersionGateDecision.VERSION_GATE_DROP
 
     async def _read(self, event: UpsertEvent) -> UpsertRequest:
         data = await self._documents.get(event.s3_key)

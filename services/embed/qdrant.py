@@ -22,12 +22,12 @@ _PAYLOAD_INDEXES = {
 }
 
 
-class State(StrEnum):
+class QdrantPointState(StrEnum):
     # every search filters on live, so the other three are invisible to readers
-    STAGING = "staging"
-    LIVE = "live"
-    SUPERSEDED = "superseded"
-    DELETED = "deleted"
+    QDRANT_POINT_STAGING = "staging"
+    QDRANT_POINT_LIVE = "live"
+    QDRANT_POINT_SUPERSEDED = "superseded"
+    QDRANT_POINT_DELETED = "deleted"
 
 
 class CollectionMismatch(RuntimeError):
@@ -83,13 +83,19 @@ def publish_operations(
     # after a crash the postgres rows already hold the new positions and no diff would show the move
     operations: list[models.UpdateOperation] = [
         _set(
-            {"state": State.LIVE.value, "version": version, "chunk_idx": chunk.chunk_idx},
+            {
+                "state": QdrantPointState.QDRANT_POINT_LIVE.value,
+                "version": version,
+                "chunk_idx": chunk.chunk_idx,
+            },
             _ids([chunk.chunk_id]),
         )
         for chunk in live
     ]
     if superseded:
-        operations.append(_set({"state": State.SUPERSEDED.value}, _ids(superseded)))
+        operations.append(
+            _set({"state": QdrantPointState.QDRANT_POINT_SUPERSEDED.value}, _ids(superseded))
+        )
     return operations
 
 
@@ -141,7 +147,10 @@ class ChunkIndex:
             must=[models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id))]
         )
         await self._client.set_payload(
-            self._collection, {"state": State.DELETED.value}, points=where, wait=True
+            self._collection,
+            {"state": QdrantPointState.QDRANT_POINT_DELETED.value},
+            points=where,
+            wait=True,
         )
 
 
@@ -154,7 +163,7 @@ def _payload(payload: ChunkPayload) -> dict[str, object]:
         "model_version": payload.model_version,
         "locale": payload.locale,
         "text": payload.text,
-        "state": State.STAGING.value,
+        "state": QdrantPointState.QDRANT_POINT_STAGING.value,
     }
     # a missing brand or color is left out, a filter on it simply does not match
     if payload.brand is not None:

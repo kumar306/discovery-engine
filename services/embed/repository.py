@@ -7,7 +7,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from services.embed.diff import Positions
-from services.embed.gate import GateDecision, GateState, gate
+from services.embed.gate import GateState, VersionGateDecision, gate
 
 # the document row is the lock for everything the worker changes about one document
 # a second worker, or the ingest api writing a newer version, waits here until we commit
@@ -68,9 +68,9 @@ returning indexed_version
 """
 
 
-class CommitOutcome(StrEnum):
-    COMMITTED = "committed"
-    STALE = "stale"
+class PgCommitResult(StrEnum):
+    PG_COMMIT_APPLIED = "committed"
+    PG_COMMIT_SKIPPED_STALE = "stale"
 
 
 class MissingDocument(RuntimeError):
@@ -116,11 +116,11 @@ class ChunkRepository:
 
     async def commit_version(
         self, corpus: str, doc_id: str, version: int, chunks: Sequence[NewChunk]
-    ) -> CommitOutcome:
+    ) -> PgCommitResult:
         ids = [chunk.chunk_id for chunk in chunks]
         async with self._pool.connection() as conn, conn.transaction():
             if not await self._lock_and_judge(conn, corpus, doc_id, version):
-                return CommitOutcome.STALE
+                return PgCommitResult.PG_COMMIT_SKIPPED_STALE
             # why replace all, not a delta computed in python from diff_chunks
             # that delta was computed before this lock was held, so it could describe rows
             # that changed while we waited, here the sql reads the rows it has locked, so the
@@ -148,16 +148,16 @@ class ChunkRepository:
                 )
             await conn.execute(_REVIVE, (corpus, doc_id, ids))
             await conn.execute(_SET_COMMITTED, (version, corpus, doc_id))
-        return CommitOutcome.COMMITTED
+        return PgCommitResult.PG_COMMIT_APPLIED
 
-    async def commit_delete(self, corpus: str, doc_id: str, version: int) -> CommitOutcome:
+    async def commit_delete(self, corpus: str, doc_id: str, version: int) -> PgCommitResult:
         async with self._pool.connection() as conn, conn.transaction():
             if not await self._lock_and_judge(conn, corpus, doc_id, version):
-                return CommitOutcome.STALE
+                return PgCommitResult.PG_COMMIT_SKIPPED_STALE
             await conn.execute(_QUEUE_ALL, (corpus, doc_id))
             await conn.execute(_DELETE_CHUNKS, (corpus, doc_id))
             await conn.execute(_SET_DELETED, (version, corpus, doc_id))
-        return CommitOutcome.COMMITTED
+        return PgCommitResult.PG_COMMIT_APPLIED
 
     async def mark_indexed(self, corpus: str, doc_id: str, version: int) -> bool:
         async with self._pool.connection() as conn:
@@ -177,4 +177,6 @@ class ChunkRepository:
             raise MissingDocument(f"document {corpus}/{doc_id} does not exist")
         # the same pure gate as before the work started, judged again now that we hold the lock
         # a worker that waited here sees the committed row of whoever held it before
-        return gate(version, _gate_state(row[0], row[1])) is GateDecision.PROCEED
+        return (
+            gate(version, _gate_state(row[0], row[1])) is VersionGateDecision.VERSION_GATE_PROCEED
+        )

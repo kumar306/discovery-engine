@@ -17,7 +17,7 @@ from libs.observability.logging import request_id_var
 from libs.resilience.bulkhead import Bulkhead, Overloaded
 from libs.schemas import UpsertRequest
 from libs.schemas.documents import MAX_VERSION, DocId
-from services.ingest.service import Accepted, Refused
+from services.ingest.service import WriteAccepted, WriteRefused
 from services.ingest.settings import IngestSettings
 from services.ingest.storage import StorageUnavailable
 
@@ -35,9 +35,13 @@ type Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
 
 
 class IngestPort(Protocol):
-    async def upsert(self, request: UpsertRequest, request_id: str) -> Accepted | Refused: ...
+    async def upsert(
+        self, request: UpsertRequest, request_id: str
+    ) -> WriteAccepted | WriteRefused: ...
 
-    async def delete(self, doc_id: str, version: int, request_id: str) -> Accepted | Refused: ...
+    async def delete(
+        self, doc_id: str, version: int, request_id: str
+    ) -> WriteAccepted | WriteRefused: ...
 
 
 class ApiError(Exception):
@@ -228,8 +232,8 @@ def create_app(
             request, outcome, "database_busy", "the database is busy, try again shortly"
         )
 
-    def answer(request: Request, result: Accepted | Refused) -> JSONResponse:
-        if isinstance(result, Refused):
+    def answer(request: Request, result: WriteAccepted | WriteRefused) -> JSONResponse:
+        if isinstance(result, WriteRefused):
             raise ApiError(
                 409,
                 result.error,

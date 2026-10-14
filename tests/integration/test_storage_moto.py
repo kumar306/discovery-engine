@@ -13,7 +13,7 @@ from libs.resilience.bulkhead import Overloaded
 from libs.schemas import UpsertRequest
 from libs.schemas.hashing import content_sha
 from services.ingest.events import prepare_upsert
-from services.ingest.storage import DocumentStore, MissingObject, PutResult, StorageUnavailable
+from services.ingest.storage import DocumentStore, MissingObject, S3PutResult, StorageUnavailable
 
 from .conftest import POLICY, S3_BULKHEAD_LIMIT, Sleeps, make_store, moto_client
 
@@ -42,7 +42,7 @@ async def test_the_canonical_bytes_land_at_the_derived_key(
 ) -> None:
     prepared = prepare_upsert(request(), NOW)
     result = await store[0].put_if_absent(prepared.key, prepared.data, prepared.content_sha)
-    assert result is PutResult.CREATED
+    assert result is S3PutResult.S3_PUT_CREATED
     assert prepared.key == "esci/D1/v1.json"
     assert stored(bucket, prepared.key) == prepared.data
     assert content_sha(stored(bucket, prepared.key)) == prepared.content_sha
@@ -57,7 +57,7 @@ async def test_writing_the_same_document_again_is_already_there_and_changes_noth
     prepared = prepare_upsert(request(), NOW)
     await store[0].put_if_absent(prepared.key, prepared.data, prepared.content_sha)
     again = await store[0].put_if_absent(prepared.key, prepared.data, prepared.content_sha)
-    assert again is PutResult.ALREADY_THERE
+    assert again is S3PutResult.S3_PUT_ALREADY_THERE
     assert stored(bucket, prepared.key) == prepared.data
 
 
@@ -69,7 +69,7 @@ async def test_different_content_at_the_same_key_is_a_conflict_and_the_first_one
     assert first.key == second.key
     await store[0].put_if_absent(first.key, first.data, first.content_sha)
     result = await store[0].put_if_absent(second.key, second.data, second.content_sha)
-    assert result is PutResult.CONFLICT
+    assert result is S3PutResult.S3_PUT_CONFLICT
     assert stored(bucket, first.key) == first.data
 
 
@@ -83,8 +83,8 @@ async def test_two_writers_of_different_content_get_one_winner_and_one_conflict(
             store[0].put_if_absent(a.key, a.data, a.content_sha),
             store[0].put_if_absent(b.key, b.data, b.content_sha),
         )
-        assert sorted(results) == sorted([PutResult.CREATED, PutResult.CONFLICT])
-        winner = a if results[0] is PutResult.CREATED else b
+        assert sorted(results) == sorted([S3PutResult.S3_PUT_CREATED, S3PutResult.S3_PUT_CONFLICT])
+        winner = a if results[0] is S3PutResult.S3_PUT_CREATED else b
         assert stored(bucket, a.key) == winner.data
 
 
@@ -97,7 +97,9 @@ async def test_two_writers_of_the_same_content_get_created_and_already_there(
             store[0].put_if_absent(prepared.key, prepared.data, prepared.content_sha),
             store[0].put_if_absent(prepared.key, prepared.data, prepared.content_sha),
         )
-        assert sorted(results) == sorted([PutResult.CREATED, PutResult.ALREADY_THERE])
+        assert sorted(results) == sorted(
+            [S3PutResult.S3_PUT_CREATED, S3PutResult.S3_PUT_ALREADY_THERE]
+        )
 
 
 async def test_as_many_parallel_writes_as_the_bulkhead_allows_all_succeed(
@@ -107,7 +109,7 @@ async def test_as_many_parallel_writes_as_the_bulkhead_allows_all_succeed(
     results = await asyncio.gather(
         *(store[0].put_if_absent(p.key, p.data, p.content_sha) for p in prepared)
     )
-    assert results == [PutResult.CREATED] * len(prepared)
+    assert results == [S3PutResult.S3_PUT_CREATED] * len(prepared)
     assert all(stored(bucket, p.key) == p.data for p in prepared)
 
 
@@ -138,7 +140,7 @@ async def test_a_missing_bucket_is_not_retried_and_the_store_recovers_once_it_ex
         client.create_bucket(Bucket=name)
         # the single permit was given back, so this call is not shed
         result = await store.put_if_absent(prepared.key, prepared.data, prepared.content_sha)
-        assert result is PutResult.CREATED
+        assert result is S3PutResult.S3_PUT_CREATED
     finally:
         store.close()
         client.delete_object(Bucket=name, Key=prepared.key)
@@ -173,9 +175,10 @@ async def test_a_slow_write_fills_the_bulkhead_and_the_next_caller_is_shed(bucke
         with pytest.raises(Overloaded):
             await store.put_if_absent(other.key, other.data, other.content_sha)
         blocking.release.set()
-        assert await first is PutResult.CREATED
+        assert await first is S3PutResult.S3_PUT_CREATED
         assert (
-            await store.put_if_absent(other.key, other.data, other.content_sha) is PutResult.CREATED
+            await store.put_if_absent(other.key, other.data, other.content_sha)
+            is S3PutResult.S3_PUT_CREATED
         )
     finally:
         blocking.release.set()

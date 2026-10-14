@@ -3,14 +3,14 @@
 from hypothesis import given
 from hypothesis import strategies as st
 
-from services.embed.gate import GateDecision, GateState, gate
+from services.embed.gate import GateState, VersionGateDecision, gate
 
 versions = st.lists(st.integers(min_value=0, max_value=50), max_size=40)
 
 
 def process(state: GateState | None, version: int) -> GateState | None:
     """What a worker that never crashes does with one event: pass the gate, then index it."""
-    if gate(version, state) is GateDecision.PROCEED:
+    if gate(version, state) is VersionGateDecision.VERSION_GATE_PROCEED:
         return GateState(current_version=version, indexed=True)
     return state
 

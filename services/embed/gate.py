@@ -2,9 +2,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 
-class GateDecision(StrEnum):
-    PROCEED = "proceed"
-    DROP = "drop"
+class VersionGateDecision(StrEnum):
+    VERSION_GATE_PROCEED = "proceed"
+    VERSION_GATE_DROP = "drop"
 
 
 @dataclass(frozen=True)
@@ -13,9 +13,9 @@ class GateState:
     indexed: bool
 
 
-def gate(version: int, state: GateState | None) -> GateDecision:
+def gate(version: int, state: GateState | None) -> VersionGateDecision:
     if state is None or version > state.current_version:
-        return GateDecision.PROCEED
+        return VersionGateDecision.VERSION_GATE_PROCEED
     if version == state.current_version and not state.indexed:
-        return GateDecision.PROCEED
-    return GateDecision.DROP
+        return VersionGateDecision.VERSION_GATE_PROCEED
+    return VersionGateDecision.VERSION_GATE_DROP

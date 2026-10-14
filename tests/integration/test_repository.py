@@ -10,14 +10,18 @@ import pytest
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
 from libs.db.pool import create_pool
-from services.ingest.repository import AcceptResult, DocumentRepository, Outcome, Outgoing
+from services.ingest.repository import AcceptResult, DocumentRepository, Outgoing, PgWriteResult
 from services.ingest.rules import KnownDocument
 
 from .conftest import APP_POOL_SIZE, Database, document, outbox, wait_until_a_writer_is_blocked
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
-ACCEPTED, DUPLICATE, CONFLICT = Outcome.ACCEPTED, Outcome.DUPLICATE, Outcome.CONFLICT
+ACCEPTED, DUPLICATE, CONFLICT = (
+    PgWriteResult.PG_WRITE_APPLIED,
+    PgWriteResult.PG_WRITE_DUPLICATE,
+    PgWriteResult.PG_WRITE_REJECTED,
+)
 
 
 def outgoing(doc_id: str, version: int) -> Outgoing:
@@ -76,7 +80,7 @@ async def test_the_write_is_judged_against_what_is_stored(
     db: Database,
     existing: tuple[int, str | None] | None,
     incoming: tuple[int, str | None],
-    outcome: Outcome,
+    outcome: PgWriteResult,
     latest: int,
 ) -> None:
     if existing is not None:
@@ -224,7 +228,7 @@ async def test_a_writer_waits_for_the_first_one_then_rereads_the_committed_row(
     db: Database,
     existing: bool,
     second: tuple[int, str],
-    outcome: Outcome,
+    outcome: PgWriteResult,
     latest: int,
 ) -> None:
     # a raw connection plays the first writer and keeps its transaction open on purpose

@@ -23,12 +23,12 @@ class DependencyUnavailable(Exception):
 # no attempt is used up, it resumes when the breaker lets a probe through
 # stall: this message was tried and its retries ran out, or its dead letter record could not be
 # written, so the trouble is on the path of the message and not a known outage
-class Verdict(StrEnum):
-    RETRY = "retry"
-    DEAD_LETTER = "dead_letter"
-    PAUSE = "pause"
-    COMMIT = "commit"
-    STALL = "stall"
+class FailureAction(StrEnum):
+    FAILURE_RETRY = "retry"
+    FAILURE_DEAD_LETTER = "dead_letter"
+    FAILURE_PAUSE = "pause"
+    FAILURE_COMMIT_OFFSET = "commit"
+    FAILURE_STALL = "stall"
 
 
 @dataclass(frozen=True)
@@ -39,17 +39,17 @@ class RetryPolicy:
 
 
 class Rejected(Exception):
-    def __init__(self, verdict: Verdict, error: Exception, attempts: int) -> None:
-        super().__init__(f"{verdict} after {attempts} attempt(s): {error!r}")
-        self.verdict = verdict
+    def __init__(self, action: FailureAction, error: Exception, attempts: int) -> None:
+        super().__init__(f"{action} after {attempts} attempt(s): {error!r}")
+        self.action = action
         self.error = error
         self.attempts = attempts
 
 
-def decide(error: Exception, attempt: int, max_attempts: int) -> Verdict:
+def decide(error: Exception, attempt: int, max_attempts: int) -> FailureAction:
     # an open breaker says the dependency is down, so never dead letter the message for it
     if isinstance(error, DependencyUnavailable):
-        return Verdict.PAUSE
+        return FailureAction.FAILURE_PAUSE
     # only an error marked permanent is the fault of the message, bad input stays bad
     # a bare ValueError is not trusted, it is as likely a bug of ours, examples we get are
     # int("abc"), uuid.UUID("not a uuid"), a pydantic ValidationError for a missing field, a
@@ -59,20 +59,20 @@ def decide(error: Exception, attempt: int, max_attempts: int) -> Verdict:
     # and everything else gets the retries and then the stall, so a bug of ours raises an alert
     # and does not push good messages into the dead letter queue
     if isinstance(error, PermanentError):
-        return Verdict.DEAD_LETTER
+        return FailureAction.FAILURE_DEAD_LETTER
     # timeouts, 5xx and anything unknown get the bounded retries
     if attempt < max_attempts:
-        return Verdict.RETRY
+        return FailureAction.FAILURE_RETRY
     # the retries are used up and nothing says the message itself is bad, so the dependency or
     # the machine is the problem and the message stays where it is, the partition stalls and
     # alerts, moving a perfectly good message to the dead letter queue because something was
     # briefly unhealthy is an anti pattern, the message is fine and would need a manual replay
-    return Verdict.STALL
+    return FailureAction.FAILURE_STALL
 
 
-def after_dead_letter(published: bool) -> Verdict:
+def after_dead_letter(published: bool) -> FailureAction:
     # offset is committed only once the dead letter record is safely written
-    return Verdict.COMMIT if published else Verdict.STALL
+    return FailureAction.FAILURE_COMMIT_OFFSET if published else FailureAction.FAILURE_STALL
 
 
 def backoff_delay(attempt: int, policy: RetryPolicy, rng: random.Random) -> float:
@@ -93,7 +93,7 @@ async def call_with_retries[T](
         try:
             return await operation()
         except Exception as error:
-            verdict = decide(error, attempt, policy.max_attempts)
-            if verdict is not Verdict.RETRY:
-                raise Rejected(verdict, error, attempt) from error
+            action = decide(error, attempt, policy.max_attempts)
+            if action is not FailureAction.FAILURE_RETRY:
+                raise Rejected(action, error, attempt) from error
             await sleep(backoff_delay(attempt, policy, rng))

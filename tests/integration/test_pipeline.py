@@ -17,7 +17,7 @@ from libs.schemas import DocEvent, UpsertEvent
 from libs.schemas.hashing import content_sha
 from services.embed.compose import ComposeError
 from services.embed.embedder import EmbedTransient
-from services.embed.pipeline import Outcome, Pipeline
+from services.embed.pipeline import KafkaEventResult, Pipeline
 from services.embed.qdrant import ChunkIndex
 from services.embed.repository import ChunkRepository
 from services.embed.settings import EmbedSettings
@@ -26,7 +26,7 @@ from tests.support.hash_embedder import HashEmbedder
 
 from .conftest import TEST_DIM, Api, document, read_points
 
-DONE, DROPPED = Outcome.DONE, Outcome.DROPPED
+DONE, DROPPED = KafkaEventResult.KAFKA_EVENT_APPLIED, KafkaEventResult.KAFKA_EVENT_SKIPPED
 
 
 def words(count: int, tag: str) -> str:

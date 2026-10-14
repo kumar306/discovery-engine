@@ -39,10 +39,10 @@ _TRANSIENT_CODES = frozenset(
 )
 
 
-class PutResult(StrEnum):
-    CREATED = "created"
-    ALREADY_THERE = "already_there"
-    CONFLICT = "conflict"
+class S3PutResult(StrEnum):
+    S3_PUT_CREATED = "created"
+    S3_PUT_ALREADY_THERE = "already_there"
+    S3_PUT_CONFLICT = "conflict"
 
 
 class StorageUnavailable(Exception):
@@ -98,7 +98,7 @@ class DocumentStore:
         self._sleep = sleep
         self._rng = rng
 
-    async def put_if_absent(self, key: str, data: bytes, sha: str) -> PutResult:
+    async def put_if_absent(self, key: str, data: bytes, sha: str) -> S3PutResult:
         loop = asyncio.get_running_loop()
         # one permit covers the call and its retries, so at most the limit of calls are in flight
         # a full bulkhead raises Overloaded here, the api turns that into a 503 as well
@@ -110,7 +110,7 @@ class DocumentStore:
         # and returns a future, a placeholder for the answer the thread will produce
         # request 1 awaits that future and yields to the event loop while its thread talks to s3
         # request 2 now runs, takes its own permit and does the same with another thread
-        # when the thread of request 1 returns PutResult.CREATED the loop completes the future
+        # when the thread of request 1 returns S3_PUT_CREATED the loop completes the future
         # and request 1 wakes up exactly where it awaited
         async with self._bulkhead:
             try:
@@ -151,7 +151,7 @@ class DocumentStore:
         self._executor.shutdown(wait=False, cancel_futures=True)
 
     # everything below runs on a worker thread, boto3 calls block
-    def _put_blocking(self, key: str, data: bytes, sha: str) -> PutResult:
+    def _put_blocking(self, key: str, data: bytes, sha: str) -> S3PutResult:
         try:
             self._client.put_object(
                 Bucket=self._bucket,
@@ -160,7 +160,7 @@ class DocumentStore:
                 ContentType="application/json",
                 IfNoneMatch="*",
             )
-            return PutResult.CREATED
+            return S3PutResult.S3_PUT_CREATED
         except ClientError as error:
             # 412 is not a failure, it means the object is already there and we compare it below
             if not _precondition_failed(error):
@@ -168,7 +168,11 @@ class DocumentStore:
         except BotoCoreError as error:
             raise classify(error) from error
         existing = self._read_blocking(key)
-        return PutResult.ALREADY_THERE if content_sha(existing) == sha else PutResult.CONFLICT
+        return (
+            S3PutResult.S3_PUT_ALREADY_THERE
+            if content_sha(existing) == sha
+            else S3PutResult.S3_PUT_CONFLICT
+        )
 
     def _read_blocking(self, key: str) -> bytes:
         try:

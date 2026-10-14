@@ -2,15 +2,15 @@
 
 import pytest
 
-from services.ingest.rules import KnownDocument, PrecheckOutcome, precheck
+from services.ingest.rules import KnownDocument, WritePrecheck, precheck
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
 
-PROCEED = PrecheckOutcome.PROCEED
-DUPLICATE = PrecheckOutcome.ACCEPT_DUPLICATE
-STALE = PrecheckOutcome.REJECT_STALE
-CONFLICT = PrecheckOutcome.REJECT_CONFLICT
+PROCEED = WritePrecheck.WRITE_PRECHECK_PROCEED
+DUPLICATE = WritePrecheck.WRITE_PRECHECK_ACCEPT_DUPLICATE
+STALE = WritePrecheck.WRITE_PRECHECK_REJECT_STALE
+CONFLICT = WritePrecheck.WRITE_PRECHECK_REJECT_CONFLICT
 
 
 @pytest.mark.parametrize(
@@ -38,6 +38,6 @@ CONFLICT = PrecheckOutcome.REJECT_CONFLICT
     ],
 )
 def test_precheck_outcome(
-    version: int, content_sha: str | None, known: KnownDocument | None, expected: PrecheckOutcome
+    version: int, content_sha: str | None, known: KnownDocument | None, expected: WritePrecheck
 ) -> None:
     assert precheck(version, content_sha, known) is expected

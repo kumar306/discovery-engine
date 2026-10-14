@@ -26,7 +26,7 @@ from services.ingest.settings import IngestSettings
 from services.ingest.storage import (
     DocumentStore,
     MissingObject,
-    PutResult,
+    S3PutResult,
     StorageUnavailable,
     build_store,
     classify,
@@ -145,7 +145,7 @@ def test_classification(error: Exception, expected: type[Exception]) -> None:
 async def test_a_new_object_is_written_only_if_absent(make_store: Any) -> None:
     client = StubS3([None])
     store, sleeps = make_store(client)
-    assert await store.put_if_absent("esci/D1/v1.json", DATA, "sha") is PutResult.CREATED
+    assert await store.put_if_absent("esci/D1/v1.json", DATA, "sha") is S3PutResult.S3_PUT_CREATED
     assert client.put_calls == [
         {
             "Bucket": "bucket",
@@ -163,7 +163,7 @@ async def test_transient_errors_are_retried_then_it_works(make_store: Any) -> No
         [client_error(503, "SlowDown"), EndpointConnectionError(endpoint_url="x"), None]
     )
     store, sleeps = make_store(client)
-    assert await store.put_if_absent("k", DATA, "sha") is PutResult.CREATED
+    assert await store.put_if_absent("k", DATA, "sha") is S3PutResult.S3_PUT_CREATED
     assert len(client.put_calls) == 3
     assert len(sleeps.delays) == 2
 
@@ -194,14 +194,16 @@ async def test_a_permanent_error_is_not_retried(make_store: Any) -> None:
 async def test_an_existing_object_with_the_same_content_is_already_there(make_store: Any) -> None:
     client = StubS3([client_error(412, "PreconditionFailed")], gets=[DATA])
     store, _ = make_store(client)
-    assert await store.put_if_absent("k", DATA, content_sha(DATA)) is PutResult.ALREADY_THERE
+    assert (
+        await store.put_if_absent("k", DATA, content_sha(DATA)) is S3PutResult.S3_PUT_ALREADY_THERE
+    )
     assert (len(client.put_calls), client.get_calls) == (1, 1)
 
 
 async def test_an_existing_object_with_other_content_is_a_conflict(make_store: Any) -> None:
     client = StubS3([client_error(412, "PreconditionFailed")], gets=[OTHER])
     store, _ = make_store(client)
-    assert await store.put_if_absent("k", DATA, content_sha(DATA)) is PutResult.CONFLICT
+    assert await store.put_if_absent("k", DATA, content_sha(DATA)) is S3PutResult.S3_PUT_CONFLICT
 
 
 async def test_a_failing_read_of_the_existing_object_retries_the_whole_call(
@@ -212,7 +214,9 @@ async def test_a_failing_read_of_the_existing_object_retries_the_whole_call(
         gets=[client_error(500, "InternalError"), DATA],
     )
     store, sleeps = make_store(client)
-    assert await store.put_if_absent("k", DATA, content_sha(DATA)) is PutResult.ALREADY_THERE
+    assert (
+        await store.put_if_absent("k", DATA, content_sha(DATA)) is S3PutResult.S3_PUT_ALREADY_THERE
+    )
     assert (len(client.put_calls), client.get_calls, len(sleeps.delays)) == (2, 2, 1)
 
 
@@ -309,8 +313,8 @@ async def test_a_full_bulkhead_sheds_the_next_caller_and_frees_up_afterwards(
     with pytest.raises(Overloaded):
         await store.put_if_absent("b", DATA, "sha")
     client.release.set()
-    assert await first is PutResult.CREATED
-    assert await store.put_if_absent("c", DATA, "sha") is PutResult.CREATED
+    assert await first is S3PutResult.S3_PUT_CREATED
+    assert await store.put_if_absent("c", DATA, "sha") is S3PutResult.S3_PUT_CREATED
 
 
 async def test_the_permit_comes_back_after_a_failure(make_store: Any) -> None:
@@ -318,7 +322,7 @@ async def test_the_permit_comes_back_after_a_failure(make_store: Any) -> None:
     store, _ = make_store(client, limit=1, wait=0.05)
     with pytest.raises(StorageUnavailable):
         await store.put_if_absent("a", DATA, "sha")
-    assert await store.put_if_absent("b", DATA, "sha") is PutResult.CREATED
+    assert await store.put_if_absent("b", DATA, "sha") is S3PutResult.S3_PUT_CREATED
 
 
 # wiring

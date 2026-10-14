@@ -22,7 +22,7 @@ from libs.observability.logging import JsonFormatter
 from libs.resilience.bulkhead import Overloaded
 from libs.schemas import UpsertRequest
 from services.ingest.app import create_app
-from services.ingest.service import Accepted, Refused
+from services.ingest.service import WriteAccepted, WriteRefused
 from services.ingest.settings import IngestSettings
 from services.ingest.storage import StorageUnavailable
 
@@ -31,8 +31,8 @@ LIMIT = 2000
 
 
 class RecordingIngest:
-    def __init__(self, result: Accepted | Refused | None = None) -> None:
-        self.result = result or Accepted("D1", 1, NOW)
+    def __init__(self, result: WriteAccepted | WriteRefused | None = None) -> None:
+        self.result = result or WriteAccepted("D1", 1, NOW)
         self.error: BaseException | None = None
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
@@ -40,18 +40,20 @@ class RecordingIngest:
         self.calls: list[tuple[UpsertRequest, str]] = []
         self.deletes: list[tuple[str, int, str]] = []
 
-    async def _answer(self) -> Accepted | Refused:
+    async def _answer(self) -> WriteAccepted | WriteRefused:
         self.entered.set()
         await self.release.wait()
         if self.error is not None:
             raise self.error
         return self.result
 
-    async def upsert(self, request: UpsertRequest, request_id: str) -> Accepted | Refused:
+    async def upsert(self, request: UpsertRequest, request_id: str) -> WriteAccepted | WriteRefused:
         self.calls.append((request, request_id))
         return await self._answer()
 
-    async def delete(self, doc_id: str, version: int, request_id: str) -> Accepted | Refused:
+    async def delete(
+        self, doc_id: str, version: int, request_id: str
+    ) -> WriteAccepted | WriteRefused:
         self.deletes.append((doc_id, version, request_id))
         return await self._answer()
 
@@ -280,15 +282,15 @@ async def test_a_valid_body_reaches_the_service_once_and_gets_the_202_body(
 @pytest.mark.parametrize(
     ("refusal", "error", "current"),
     [
-        pytest.param(Refused("stale_version", 7), "stale_version", 7, id="stale"),
-        pytest.param(Refused("content_conflict", 5), "content_conflict", 5, id="conflict"),
+        pytest.param(WriteRefused("stale_version", 7), "stale_version", 7, id="stale"),
+        pytest.param(WriteRefused("content_conflict", 5), "content_conflict", 5, id="conflict"),
         pytest.param(
-            Refused("content_conflict", None), "content_conflict", None, id="leftover object"
+            WriteRefused("content_conflict", None), "content_conflict", None, id="leftover object"
         ),
     ],
 )
 async def test_a_refusal_becomes_a_409_with_the_current_version(
-    refusal: Refused, error: str, current: int | None
+    refusal: WriteRefused, error: str, current: int | None
 ) -> None:
     async with await make_client(RecordingIngest(refusal)) as client:
         response = await post(client, product())
@@ -314,7 +316,7 @@ async def delete(
 async def test_a_delete_reaches_the_service_and_gets_the_202_body(
     client: httpx.AsyncClient, service: RecordingIngest
 ) -> None:
-    service.result = Accepted("D1", 3, NOW)
+    service.result = WriteAccepted("D1", 3, NOW)
     response = await delete(client, "D1", "3")
     assert response.status_code == 202
     assert response.json() == {
@@ -366,7 +368,7 @@ async def test_a_delete_with_bad_input_gets_a_422_and_never_reaches_the_service(
 
 
 async def test_a_refused_delete_is_a_409_like_a_refused_write() -> None:
-    service = RecordingIngest(Refused("stale_version", 9))
+    service = RecordingIngest(WriteRefused("stale_version", 9))
     async with await make_client(service) as client:
         response = await delete(client, "D1", "3")
     assert response.status_code == 409

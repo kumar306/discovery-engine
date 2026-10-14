@@ -35,10 +35,10 @@ _KNOWN = (
 )
 
 
-class Outcome(StrEnum):
-    ACCEPTED = "accepted"
-    DUPLICATE = "duplicate"
-    CONFLICT = "conflict"
+class PgWriteResult(StrEnum):
+    PG_WRITE_APPLIED = "accepted"
+    PG_WRITE_DUPLICATE = "duplicate"
+    PG_WRITE_REJECTED = "conflict"
 
 
 @dataclass(frozen=True)
@@ -50,7 +50,7 @@ class Outgoing:
 
 @dataclass(frozen=True)
 class AcceptResult:
-    outcome: Outcome
+    outcome: PgWriteResult
     latest_version: int
 
 
@@ -93,7 +93,7 @@ class DocumentRepository:
                         _ADD_TO_OUTBOX,
                         (doc_id, outgoing.request_id, outgoing.event_schema, outgoing.payload),
                     )
-                    return AcceptResult(Outcome.ACCEPTED, version)
+                    return AcceptResult(PgWriteResult.PG_WRITE_APPLIED, version)
             # won was empty so the block ended normally and committed a transaction with no changes
             # the where matched no row, so no document write and no outbox row exist
             # the winner's commit is visible now, a plain read tells us why we lost
@@ -104,4 +104,7 @@ class DocumentRepository:
             raise RuntimeError(f"document {corpus}/{doc_id} vanished after a lost write")
         latest_version, latest_sha = row
         same = latest_version == version and latest_sha == content_sha
-        return AcceptResult(Outcome.DUPLICATE if same else Outcome.CONFLICT, latest_version)
+        return AcceptResult(
+            PgWriteResult.PG_WRITE_DUPLICATE if same else PgWriteResult.PG_WRITE_REJECTED,
+            latest_version,
+        )

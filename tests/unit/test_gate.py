@@ -2,10 +2,10 @@
 
 import pytest
 
-from services.embed.gate import GateDecision, GateState, gate
+from services.embed.gate import GateState, VersionGateDecision, gate
 
-PROCEED = GateDecision.PROCEED
-DROP = GateDecision.DROP
+PROCEED = VersionGateDecision.VERSION_GATE_PROCEED
+DROP = VersionGateDecision.VERSION_GATE_DROP
 
 
 @pytest.mark.parametrize(
@@ -22,7 +22,9 @@ DROP = GateDecision.DROP
         pytest.param(4, GateState(5, indexed=False), DROP, id="lower than a stuck version"),
     ],
 )
-def test_gate_decision(version: int, state: GateState | None, expected: GateDecision) -> None:
+def test_gate_decision(
+    version: int, state: GateState | None, expected: VersionGateDecision
+) -> None:
     assert gate(version, state) is expected
 
 

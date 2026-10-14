@@ -11,11 +11,11 @@ from pydantic import ValidationError
 
 from libs.resilience.retry import (
     DependencyUnavailable,
+    FailureAction,
     PermanentError,
     Rejected,
     RetryPolicy,
     TransientError,
-    Verdict,
     after_dead_letter,
     backoff_delay,
     call_with_retries,
@@ -43,54 +43,80 @@ class BreakerAndBadInput(DependencyUnavailable, PermanentError):
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
-        pytest.param(TransientError("busy"), Verdict.RETRY, id="marked transient"),
-        pytest.param(TimeoutError(), Verdict.RETRY, id="timeout"),
-        pytest.param(ConnectionResetError(), Verdict.RETRY, id="connection reset"),
-        pytest.param(OSError("disk"), Verdict.RETRY, id="other os error"),
-        pytest.param(RuntimeError("boom"), Verdict.RETRY, id="unknown errors get the retries"),
-        pytest.param(PermanentError("bad"), Verdict.DEAD_LETTER, id="marked permanent"),
-        pytest.param(ComposeError("header too big"), Verdict.DEAD_LETTER, id="cannot compose"),
+        pytest.param(TransientError("busy"), FailureAction.FAILURE_RETRY, id="marked transient"),
+        pytest.param(TimeoutError(), FailureAction.FAILURE_RETRY, id="timeout"),
+        pytest.param(ConnectionResetError(), FailureAction.FAILURE_RETRY, id="connection reset"),
+        pytest.param(OSError("disk"), FailureAction.FAILURE_RETRY, id="other os error"),
+        pytest.param(
+            RuntimeError("boom"), FailureAction.FAILURE_RETRY, id="unknown errors get the retries"
+        ),
+        pytest.param(
+            PermanentError("bad"), FailureAction.FAILURE_DEAD_LETTER, id="marked permanent"
+        ),
+        pytest.param(
+            ComposeError("header too big"), FailureAction.FAILURE_DEAD_LETTER, id="cannot compose"
+        ),
         # a bare value error is not trusted as the fault of the message, it may be our own bug
-        pytest.param(a_validation_error(), Verdict.RETRY, id="bare validation error"),
-        pytest.param(json.JSONDecodeError("bad", "{", 0), Verdict.RETRY, id="bare decode error"),
-        pytest.param(ValueError("our own guard"), Verdict.RETRY, id="bare value error"),
-        pytest.param(DependencyUnavailable("breaker open"), Verdict.PAUSE, id="breaker open"),
-        pytest.param(BreakerAndBadInput("both"), Verdict.PAUSE, id="breaker wins over bad input"),
+        pytest.param(a_validation_error(), FailureAction.FAILURE_RETRY, id="bare validation error"),
+        pytest.param(
+            json.JSONDecodeError("bad", "{", 0), FailureAction.FAILURE_RETRY, id="bare decode error"
+        ),
+        pytest.param(
+            ValueError("our own guard"), FailureAction.FAILURE_RETRY, id="bare value error"
+        ),
+        pytest.param(
+            DependencyUnavailable("breaker open"), FailureAction.FAILURE_PAUSE, id="breaker open"
+        ),
+        pytest.param(
+            BreakerAndBadInput("both"),
+            FailureAction.FAILURE_PAUSE,
+            id="breaker wins over bad input",
+        ),
     ],
 )
-def test_first_attempt_verdict(error: Exception, expected: Verdict) -> None:
+def test_first_attempt_action(error: Exception, expected: FailureAction) -> None:
     assert decide(error, attempt=1, max_attempts=3) is expected
 
 
 @pytest.mark.parametrize(
     ("attempt", "expected"),
-    [(1, Verdict.RETRY), (2, Verdict.RETRY), (3, Verdict.STALL), (4, Verdict.STALL)],
+    [
+        (1, FailureAction.FAILURE_RETRY),
+        (2, FailureAction.FAILURE_RETRY),
+        (3, FailureAction.FAILURE_STALL),
+        (4, FailureAction.FAILURE_STALL),
+    ],
 )
 def test_a_transient_error_is_retried_until_the_attempts_run_out_and_then_stalls(
-    attempt: int, expected: Verdict
+    attempt: int, expected: FailureAction
 ) -> None:
     assert decide(TimeoutError(), attempt=attempt, max_attempts=3) is expected
 
 
 @pytest.mark.parametrize("attempt", [1, 2, 3])
 def test_permanent_errors_never_retry_and_an_open_breaker_never_dead_letters(attempt: int) -> None:
-    assert decide(PermanentError("bad"), attempt, 3) is Verdict.DEAD_LETTER
-    assert decide(DependencyUnavailable("down"), attempt, 3) is Verdict.PAUSE
+    assert decide(PermanentError("bad"), attempt, 3) is FailureAction.FAILURE_DEAD_LETTER
+    assert decide(DependencyUnavailable("down"), attempt, 3) is FailureAction.FAILURE_PAUSE
 
 
 # 27. when the dead letter record cannot be written the worker stalls
 
 
 def test_the_offset_is_committed_only_after_the_dead_letter_record_is_written() -> None:
-    assert after_dead_letter(published=True) is Verdict.COMMIT
-    assert after_dead_letter(published=False) is Verdict.STALL
+    assert after_dead_letter(published=True) is FailureAction.FAILURE_COMMIT_OFFSET
+    assert after_dead_letter(published=False) is FailureAction.FAILURE_STALL
 
 
 @given(st.integers(min_value=1, max_value=10))
 def test_decide_never_commits_on_its_own(attempt: int) -> None:
     errors = [TimeoutError(), PermanentError("x"), DependencyUnavailable("x"), RuntimeError("x")]
     verdicts = {decide(error, attempt, 3) for error in errors}
-    assert verdicts <= {Verdict.RETRY, Verdict.DEAD_LETTER, Verdict.PAUSE, Verdict.STALL}
+    assert verdicts <= {
+        FailureAction.FAILURE_RETRY,
+        FailureAction.FAILURE_DEAD_LETTER,
+        FailureAction.FAILURE_PAUSE,
+        FailureAction.FAILURE_STALL,
+    }
 
 
 @given(st.integers(min_value=1, max_value=10))
@@ -108,9 +134,13 @@ def test_only_the_messages_own_faults_are_ever_dead_lettered(attempt: int) -> No
         a_validation_error(),
         json.JSONDecodeError("b", "{", 0),
     ]
-    assert all(decide(error, attempt, 3) is not Verdict.DEAD_LETTER for error in unhealthy)
+    assert all(
+        decide(error, attempt, 3) is not FailureAction.FAILURE_DEAD_LETTER for error in unhealthy
+    )
     bad_message = [PermanentError("x"), ComposeError("x")]
-    assert all(decide(error, attempt, 3) is Verdict.DEAD_LETTER for error in bad_message)
+    assert all(
+        decide(error, attempt, 3) is FailureAction.FAILURE_DEAD_LETTER for error in bad_message
+    )
 
 
 # 26. backoff: exponential ceiling with full jitter
@@ -191,7 +221,7 @@ async def test_a_transient_error_that_never_clears_stalls_the_partition_after_th
     operation, sleeps = Scripted(TimeoutError("slow")), Sleeps()
     with pytest.raises(Rejected) as exc_info:
         await call_with_retries(operation, POLICY, sleeps, MaxRandom())
-    assert exc_info.value.verdict is Verdict.STALL
+    assert exc_info.value.action is FailureAction.FAILURE_STALL
     assert exc_info.value.attempts == 3
     assert operation.calls == 3
     assert len(sleeps.delays) == 2  # no wait after the last attempt
@@ -202,7 +232,7 @@ async def test_a_permanent_error_is_dead_lettered_at_once() -> None:
     operation, sleeps = Scripted(error), Sleeps()
     with pytest.raises(Rejected) as exc_info:
         await call_with_retries(operation, POLICY, sleeps, MaxRandom())
-    assert exc_info.value.verdict is Verdict.DEAD_LETTER
+    assert exc_info.value.action is FailureAction.FAILURE_DEAD_LETTER
     assert exc_info.value.error is error
     assert exc_info.value.__cause__ is error
     assert (operation.calls, sleeps.delays) == (1, [])
@@ -212,7 +242,7 @@ async def test_an_open_breaker_pauses_without_retrying() -> None:
     operation, sleeps = Scripted(DependencyUnavailable("qdrant down")), Sleeps()
     with pytest.raises(Rejected) as exc_info:
         await call_with_retries(operation, POLICY, sleeps, MaxRandom())
-    assert exc_info.value.verdict is Verdict.PAUSE
+    assert exc_info.value.action is FailureAction.FAILURE_PAUSE
     assert (operation.calls, sleeps.delays) == (1, [])
 
 

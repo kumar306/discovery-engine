@@ -12,7 +12,7 @@ from typing import Any, ClassVar
 import numpy as np
 import pytest
 
-from libs.resilience.retry import Verdict, decide
+from libs.resilience.retry import FailureAction, decide
 from services.embed import embedder as embedder_module
 from services.embed.compose import Limits
 from services.embed.embedder import (
@@ -230,9 +230,10 @@ async def test_verify_stops_a_worker_whose_model_does_not_fit_the_collection() -
 
 def test_the_errors_plug_into_the_existing_retry_decisions() -> None:
     assert (
-        decide(EmbedPermanent(0, ValueError("x")), attempt=1, max_attempts=3) is Verdict.DEAD_LETTER
+        decide(EmbedPermanent(0, ValueError("x")), attempt=1, max_attempts=3)
+        is FailureAction.FAILURE_DEAD_LETTER
     )
-    assert decide(EmbedTransient("slow"), attempt=1, max_attempts=3) is Verdict.RETRY
+    assert decide(EmbedTransient("slow"), attempt=1, max_attempts=3) is FailureAction.FAILURE_RETRY
 
 
 # threads: the model runs beside the event loop, never on it

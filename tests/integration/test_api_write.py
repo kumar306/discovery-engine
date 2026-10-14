@@ -5,7 +5,7 @@ import json
 from libs.schemas import UpsertEvent, doc_event_adapter
 from libs.schemas.hashing import canonical_bytes, content_sha
 from services.ingest.events import EVENT_SCHEMA, prepare_upsert
-from services.ingest.storage import PutResult
+from services.ingest.storage import S3PutResult
 
 from .conftest import NOW, Api, document, outbox, request_for
 
@@ -74,7 +74,7 @@ async def test_a_retry_after_a_crash_between_s3_and_postgres_completes_the_write
     prepared = prepare_upsert(request_for("D1", 1), NOW)
     assert (
         await api.store.put_if_absent(prepared.key, prepared.data, prepared.content_sha)
-        is PutResult.CREATED
+        is S3PutResult.S3_PUT_CREATED
     )
     assert document(api.database.direct_dsn, "D1") is None
     response = await api.post("D1", 1)
