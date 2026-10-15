@@ -34,14 +34,17 @@ from libs.db.migrate import migrate
 from libs.db.pool import create_pool
 from libs.resilience.bulkhead import Bulkhead
 from libs.resilience.retry import RetryPolicy
-from libs.schemas import UpsertRequest, doc_event_adapter
-from services.embed.qdrant import ensure_collection
+from libs.schemas import DocEvent, UpsertRequest, doc_event_adapter
+from services.embed.pipeline import Pipeline
+from services.embed.qdrant import ChunkIndex, ensure_collection
+from services.embed.repository import ChunkRepository
 from services.embed.settings import EmbedSettings
 from services.ingest.app import create_app
 from services.ingest.repository import DocumentRepository
 from services.ingest.service import IngestService
 from services.ingest.settings import IngestSettings
 from services.ingest.storage import DocumentStore
+from tests.support.hash_embedder import HashEmbedder
 
 DIRECT = os.environ.get("TEST_POSTGRES_DIRECT", "search:search_dev_only@127.0.0.1:5432")
 POOLED = os.environ.get("TEST_POSTGRES_POOLED", "search:search_dev_only@127.0.0.1:6432")
@@ -442,3 +445,80 @@ async def read_points(
             found[uuid.UUID(str(point.id))] = dict(point.payload or {})
         if offset is None:
             return found
+
+
+# the worker pipeline on the real stores, with the hash stub for the model
+
+
+def words(count: int, tag: str) -> str:
+    return " ".join(f"{tag}{n}" for n in range(count))
+
+
+# with the stub's 64 token limit this is two chunks: the bullets, then the description
+BASE: dict[str, Any] = {
+    "title": "Acme mouse",
+    "bullets": [words(20, "a"), words(20, "b")],
+    "description": words(30, "d"),
+}
+
+
+@dataclass
+class Rig:
+    api: Api
+    pipeline: Pipeline
+    embedder: HashEmbedder
+    pg_chunk_repo: ChunkRepository
+    qdrant_index: ChunkIndex
+    qdrant_client: AsyncQdrantClient
+    embed_settings: EmbedSettings
+
+    def pipeline_with(self, **parts: Any) -> Pipeline:
+        return Pipeline(
+            parts.get("pg_chunk_repo", self.pg_chunk_repo),
+            parts.get("qdrant_index", self.qdrant_index),
+            parts.get("s3_documents", self.api.s3_store),
+            parts.get("embedder", self.embedder),
+            self.embed_settings,
+        )
+
+    async def ingest(self, doc_id: str, version: int, **fields: Any) -> DocEvent:
+        response = await self.api.post(doc_id, version, **(fields or BASE))
+        assert response.status_code == 202
+        return self.api.events(doc_id)[-1]  # type: ignore[no-any-return]
+
+    async def remove(self, doc_id: str, version: int) -> DocEvent:
+        assert (await self.api.delete(doc_id, version)).status_code == 202
+        return self.api.events(doc_id)[-1]  # type: ignore[no-any-return]
+
+    async def points(self, doc_id: str) -> dict[uuid.UUID, dict[str, Any]]:
+        return await read_points(self.qdrant_client, self.embed_settings.qdrant_collection, doc_id)
+
+    def row(self, doc_id: str) -> dict[str, Any]:
+        found = document(self.api.database.direct_dsn, doc_id)
+        assert found is not None
+        return found
+
+    async def untouched(self, doc_id: str) -> None:
+        # nothing was committed and nothing is visible
+        row = self.row(doc_id)
+        assert (row["current"], row["indexed"]) == (None, None)
+        snapshot = await self.pg_chunk_repo.snapshot("esci", doc_id)
+        assert snapshot.current == {}
+        assert snapshot.stale == frozenset()
+        assert not any(p["state"] == "live" for p in (await self.points(doc_id)).values())
+
+
+@pytest.fixture
+async def rig(
+    api: Api, pool: AsyncConnectionPool, qdrant: AsyncQdrantClient, collection: EmbedSettings
+) -> Rig:
+    pg_chunk_repo = ChunkRepository(pool)
+    qdrant_index = ChunkIndex(qdrant, collection.qdrant_collection)
+    embedder = HashEmbedder(dense_dim=TEST_DIM, max_tokens=64)
+    pipeline = Pipeline(pg_chunk_repo, qdrant_index, api.s3_store, embedder, collection)
+    return Rig(api, pipeline, embedder, pg_chunk_repo, qdrant_index, qdrant, collection)
+
+
+def first_words(texts: list[str]) -> list[str]:
+    # the second line of a chunk is where the body starts, the first word tells the chunks apart
+    return [text.split("\n")[1].split()[0] for text in texts]

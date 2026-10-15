@@ -4,41 +4,23 @@ Documents come in through the real ingest api, so the events are exactly what th
 carry. The stub embedder keeps these tests about the pipeline: order, versions, crash safety.
 """
 
-import uuid
-from dataclasses import dataclass
 from typing import Any
 
 import pytest
-from psycopg_pool import AsyncConnectionPool
-from qdrant_client import AsyncQdrantClient, models
+from qdrant_client import models
 
 from libs.resilience.retry import PermanentError
-from libs.schemas import DocEvent, UpsertEvent
+from libs.schemas import UpsertEvent
 from libs.schemas.hashing import content_sha
 from services.embed.compose import ComposeError
 from services.embed.embedder import EmbedTransient
 from services.embed.pipeline import KafkaEventResult, Pipeline
-from services.embed.qdrant import ChunkIndex
-from services.embed.repository import ChunkRepository
-from services.embed.settings import EmbedSettings
 from services.ingest.storage import MissingObject, StorageUnavailable
 from tests.support.hash_embedder import HashEmbedder
 
-from .conftest import TEST_DIM, Api, document, read_points
+from .conftest import BASE, TEST_DIM, Rig, first_words, words
 
 DONE, DROPPED = KafkaEventResult.KAFKA_EVENT_APPLIED, KafkaEventResult.KAFKA_EVENT_SKIPPED
-
-
-def words(count: int, tag: str) -> str:
-    return " ".join(f"{tag}{n}" for n in range(count))
-
-
-# with the stub's 64 token limit this is two chunks: the bullets, then the description
-BASE: dict[str, Any] = {
-    "title": "Acme mouse",
-    "bullets": [words(20, "a"), words(20, "b")],
-    "description": words(30, "d"),
-}
 
 
 class Recorder:
@@ -97,69 +79,6 @@ class RaceBefore:
             return await target(*args, **kwargs)
 
         return call
-
-
-@dataclass
-@dataclass
-class Rig:
-    api: Api
-    pipeline: Pipeline
-    embedder: HashEmbedder
-    pg_chunk_repo: ChunkRepository
-    qdrant_index: ChunkIndex
-    qdrant_client: AsyncQdrantClient
-    embed_settings: EmbedSettings
-
-    def pipeline_with(self, **parts: Any) -> Pipeline:
-        return Pipeline(
-            parts.get("pg_chunk_repo", self.pg_chunk_repo),
-            parts.get("qdrant_index", self.qdrant_index),
-            parts.get("s3_documents", self.api.s3_store),
-            parts.get("embedder", self.embedder),
-            self.embed_settings,
-        )
-
-    async def ingest(self, doc_id: str, version: int, **fields: Any) -> DocEvent:
-        response = await self.api.post(doc_id, version, **(fields or BASE))
-        assert response.status_code == 202
-        return self.api.events(doc_id)[-1]  # type: ignore[no-any-return]
-
-    async def remove(self, doc_id: str, version: int) -> DocEvent:
-        assert (await self.api.delete(doc_id, version)).status_code == 202
-        return self.api.events(doc_id)[-1]  # type: ignore[no-any-return]
-
-    async def points(self, doc_id: str) -> dict[uuid.UUID, dict[str, Any]]:
-        return await read_points(self.qdrant_client, self.embed_settings.qdrant_collection, doc_id)
-
-    def row(self, doc_id: str) -> dict[str, Any]:
-        found = document(self.api.database.direct_dsn, doc_id)
-        assert found is not None
-        return found
-
-    async def untouched(self, doc_id: str) -> None:
-        # nothing was committed and nothing is visible
-        row = self.row(doc_id)
-        assert (row["current"], row["indexed"]) == (None, None)
-        snapshot = await self.pg_chunk_repo.snapshot("esci", doc_id)
-        assert snapshot.current == {}
-        assert snapshot.stale == frozenset()
-        assert not any(p["state"] == "live" for p in (await self.points(doc_id)).values())
-
-
-@pytest.fixture
-async def rig(
-    api: Api, pool: AsyncConnectionPool, qdrant: AsyncQdrantClient, collection: EmbedSettings
-) -> Rig:
-    pg_chunk_repo = ChunkRepository(pool)
-    qdrant_index = ChunkIndex(qdrant, collection.qdrant_collection)
-    embedder = HashEmbedder(dense_dim=TEST_DIM, max_tokens=64)
-    pipeline = Pipeline(pg_chunk_repo, qdrant_index, api.s3_store, embedder, collection)
-    return Rig(api, pipeline, embedder, pg_chunk_repo, qdrant_index, qdrant, collection)
-
-
-def first_words(texts: list[str]) -> list[str]:
-    # the second line of a chunk is where the body starts, the first word tells the chunks apart
-    return [text.split("\n")[1].split()[0] for text in texts]
 
 
 # a document becomes searchable

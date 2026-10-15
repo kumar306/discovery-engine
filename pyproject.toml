@@ -93,5 +93,6 @@ markers = [
     "failure: fault-injection tests through Toxiproxy",
     "spark: needs a local Spark session (run in Docker on Windows)",
     "eval: retrieval-quality regression gate",
+    "crash: kill the worker at every call and check recovery, slow, run with make test-crash",
 ]
 addopts = "-ra --strict-markers -m 'not integration and not failure and not spark and not eval'"

@@ -2,7 +2,7 @@
 COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 UV := uv run
 
-.PHONY: help setup up down topics init test test-integration test-spark lint typecheck eval bench chaos deploy data
+.PHONY: help setup up down topics init test test-integration test-crash test-spark lint typecheck eval bench chaos deploy data
 
 help:            ## list targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-18s %s\n",$$1,$$2}'
@@ -32,8 +32,11 @@ typecheck:       ## mypy --strict
 test: lint typecheck  ## fast tests (unit + property + contract), no Docker
 	$(UV) pytest
 
-test-integration: ## tests that need the compose stack, run make up first
-	$(UV) pytest -m integration -o addopts=""
+test-integration: ## tests that need the compose stack, run make up first, the slow crash tests are separate
+	$(UV) pytest -m "integration and not crash" -o addopts=""
+
+test-crash:      ## kill the worker at every call and in random histories, then check it recovers
+	$(UV) pytest -m crash -o addopts=""
 
 test-spark:      ## Spark tests inside Docker (Windows hosts lack winutils)
 	docker build -f deploy/compose/spark-test.Dockerfile -t sp-spark-test . && docker run --rm sp-spark-test
