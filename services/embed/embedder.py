@@ -46,6 +46,10 @@ class Embedder(Protocol):
 
     async def embed(self, texts: Sequence[str], timeout_s: float) -> list[Embedding]: ...
 
+    async def verify(self) -> None: ...
+
+    def close(self) -> None: ...
+
 
 class TextModel(Protocol):
     """The part of a fastembed model we use, so a fake can stand in for it in unit tests."""

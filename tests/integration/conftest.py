@@ -22,7 +22,7 @@ import boto3
 import httpx
 import psycopg
 import pytest
-from aiokafka import AIOKafkaConsumer
+from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from aiokafka.admin import AIOKafkaAdminClient, NewTopic
 from botocore.config import Config
 from botocore.exceptions import ClientError
@@ -312,9 +312,9 @@ KAFKA = os.environ.get(
 )
 
 
-@pytest.fixture
-async def topic() -> AsyncIterator[str]:
-    name = f"doc.events.test.{uuid.uuid4().hex[:10]}"
+@asynccontextmanager
+async def temporary_topic(prefix: str) -> AsyncIterator[str]:
+    name = f"{prefix}.{uuid.uuid4().hex[:10]}"
     admin = AIOKafkaAdminClient(bootstrap_servers=KAFKA)
     await admin.start()
     try:
@@ -324,6 +324,51 @@ async def topic() -> AsyncIterator[str]:
         with suppress(Exception):
             await admin.delete_topics([name])
         await admin.close()
+
+
+@pytest.fixture
+async def topic() -> AsyncIterator[str]:
+    async with temporary_topic("doc.events.test") as name:
+        yield name
+
+
+@pytest.fixture
+async def dlq_topic() -> AsyncIterator[str]:
+    async with temporary_topic("doc.events.dlq.test") as name:
+        yield name
+
+
+async def produce(
+    topic_name: str, value: bytes | None, key: bytes | None = None, partition: int | None = None
+) -> None:
+    """Put one message on a topic, on a chosen partition when the test needs two apart."""
+    producer = AIOKafkaProducer(bootstrap_servers=KAFKA)
+    await producer.start()
+    try:
+        await producer.send_and_wait(topic_name, value=value, key=key, partition=partition)
+    finally:
+        await producer.stop()
+
+
+async def committed_offsets(group: str) -> dict[int, int]:
+    """The offsets a group has committed, read through the admin api so the group is not joined."""
+    admin = AIOKafkaAdminClient(bootstrap_servers=KAFKA)
+    await admin.start()
+    try:
+        offsets = await admin.list_consumer_group_offsets(group)
+    finally:
+        await admin.close()
+    return {tp.partition: meta.offset for tp, meta in offsets.items()}
+
+
+async def eventually(check: Any, limit_s: float = 25.0, step: float = 0.1) -> None:
+    """Ask again and again until the check is true, fail with a clear error when it never is."""
+    deadline = time.monotonic() + limit_s
+    while time.monotonic() < deadline:
+        if await check():
+            return
+        await asyncio.sleep(step)
+    raise AssertionError(f"still not true after {limit_s} s")
 
 
 async def read_topic(

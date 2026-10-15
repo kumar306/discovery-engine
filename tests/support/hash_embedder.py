@@ -41,6 +41,12 @@ class HashEmbedder:
         self.calls.append(list(texts))
         return [self._one(text) for text in texts]
 
+    async def verify(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
     def _one(self, text: str) -> Embedding:
         words = sorted(set(text.lower().split()))
         # one sparse term per distinct word, its id from the word itself, so equal words match
