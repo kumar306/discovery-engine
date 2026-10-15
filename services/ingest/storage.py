@@ -19,7 +19,7 @@ from libs.resilience.retry import (
     call_with_retries,
 )
 from libs.schemas.hashing import content_sha
-from services.ingest.settings import IngestSettings
+from libs.settings import S3Settings
 
 if TYPE_CHECKING:
     from mypy_boto3_s3.client import S3Client
@@ -182,7 +182,7 @@ class DocumentStore:
 
 
 def build_store(
-    settings: IngestSettings,
+    settings: S3Settings,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     rng: random.Random | None = None,
 ) -> DocumentStore:

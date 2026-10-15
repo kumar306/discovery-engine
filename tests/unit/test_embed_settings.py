@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from services.embed.settings import EmbedSettings
+from services.ingest.settings import IngestSettings
 
 
 @pytest.fixture(autouse=True)
@@ -71,3 +72,37 @@ def test_the_machine_settings_have_sane_defaults() -> None:
     settings = EmbedSettings()
     assert (settings.embed_threads, settings.embed_sub_batch) == (2, 16)
     assert settings.embed_timeout_s > 0
+
+
+# the worker shares the postgres, s3 and kafka settings with the ingest service, under its own
+# prefix
+
+
+def test_the_worker_and_the_ingest_service_start_from_the_same_defaults() -> None:
+    worker, ingest = EmbedSettings(), IngestSettings()
+    shared = ["database_dsn", "db_pool_max", "s3_bucket", "s3_endpoint_url", "kafka_bootstrap"]
+    assert [getattr(worker, name) for name in shared] == [getattr(ingest, name) for name in shared]
+    assert (worker.topic_events, worker.topic_dlq) == ("doc.events", "doc.events.dlq")
+
+
+def test_the_worker_reads_its_own_variables_and_never_the_ingest_services(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INGEST_S3_BUCKET", "ingest-only")
+    monkeypatch.setenv("EMBED_TOPIC_EVENTS", "doc.events.blue")
+    settings = EmbedSettings()
+    assert settings.s3_bucket == "search-documents"
+    assert settings.topic_events == "doc.events.blue"
+
+
+def test_the_bulkhead_rule_holds_for_the_worker_too() -> None:
+    with pytest.raises(ValidationError, match="is above 8"):
+        EmbedSettings(s3_threads=10, s3_bulkhead_limit=9)
+
+
+def test_the_consumer_has_sane_defaults() -> None:
+    settings = EmbedSettings()
+    assert settings.consumer_group == "embed-worker"
+    assert settings.message_attempts == 3
+    assert settings.stall_base_delay_s < settings.stall_max_delay_s
+    assert settings.consumer_poll_ms <= 1000  # the stop signal is looked at at least once a second
