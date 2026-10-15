@@ -90,16 +90,16 @@ class KafkaPublisher:
 class Relay:
     def __init__(
         self,
-        pool: AsyncConnectionPool,
-        publisher: Publisher,
+        pg_pool: AsyncConnectionPool,
+        kafka_publisher: Publisher,
         batch_size: int,
         poll_interval_s: float,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         rng: random.Random | None = None,
         policy: RetryPolicy | None = None,
     ) -> None:
-        self._pool = pool
-        self._publisher = publisher
+        self._pg_pool = pg_pool
+        self._kafka_publisher = kafka_publisher
         self._batch_size = batch_size
         self._poll_interval_s = poll_interval_s
         self._sleep = sleep
@@ -111,17 +111,17 @@ class Relay:
         # the transaction stays open from the claim until the mark
         # rows it holds are skipped by every other relay, and a crash anywhere in between
         # rolls it back, so the rows stay unpublished and go out again later
-        async with self._pool.connection() as conn, conn.transaction():
+        async with self._pg_pool.connection() as conn, conn.transaction():
             rows = await (await conn.execute(_CLAIM, (self._batch_size,))).fetchall()
             if not rows:
                 return 0
             messages = [OutboxMessage(*row) for row in rows]
-            await self._publisher.publish(messages)
+            await self._kafka_publisher.publish(messages)
             await conn.execute(_MARK, ([message.id for message in messages],))
         return len(messages)
 
     async def backlog(self) -> int:
-        async with self._pool.connection() as conn:
+        async with self._pg_pool.connection() as conn:
             row = await (await conn.execute(_BACKLOG)).fetchone()
         return int(row[0]) if row else 0
 

@@ -97,7 +97,7 @@ class OnnxEmbedder:
         self._sub_batch = sub_batch
         # one worker thread: batches run one after the other, and the onnx runtime inside the
         # model has its own thread count, so the cores are shared out by two plain numbers
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="embed")
+        self._onnx_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="embed")
 
     async def embed(self, texts: Sequence[str], timeout_s: float) -> list[Embedding]:
         if not texts:
@@ -120,7 +120,7 @@ class OnnxEmbedder:
             indices = order[start : start + self._sub_batch]
             batch = [texts[i] for i in indices]
             # off the event loop, so the loop keeps serving while the model computes
-            done = await loop.run_in_executor(self._executor, self._run, batch, indices)
+            done = await loop.run_in_executor(self._onnx_executor, self._run, batch, indices)
             results.update(zip(indices, done, strict=True))
         # back in the order the caller sent them, a missing slot would be a bug and raise
         return [results[index] for index in range(len(texts))]
@@ -130,7 +130,7 @@ class OnnxEmbedder:
         await self.embed(["probe"], timeout_s=60.0)
 
     def close(self) -> None:
-        self._executor.shutdown(wait=True)
+        self._onnx_executor.shutdown(wait=True)
 
     def _run(self, batch: list[str], indices: list[int]) -> list[Embedding]:
         try:

@@ -28,15 +28,18 @@ class WriteRefused:
 
 class IngestService:
     def __init__(
-        self, repository: DocumentRepository, store: DocumentStore, clock: Callable[[], datetime]
+        self,
+        pg_documents: DocumentRepository,
+        s3_documents: DocumentStore,
+        clock: Callable[[], datetime],
     ) -> None:
-        self._repository = repository
-        self._store = store
+        self._pg_documents = pg_documents
+        self._s3_documents = s3_documents
         self._clock = clock
 
     async def upsert(self, request: UpsertRequest, request_id: str) -> WriteAccepted | WriteRefused:
         prepared = prepare_upsert(request, produced_at=self._clock())
-        known = await self._repository.known(request.corpus, request.doc_id)
+        known = await self._pg_documents.known(request.corpus, request.doc_id)
         # a cheap early answer, the compare and set in accept is the real guard
         early = self._early_answer(
             precheck(request.version, prepared.content_sha, known),
@@ -47,11 +50,13 @@ class IngestService:
         if early is not None:
             return early
         # s3 first, the object is immutable and a leftover from a crash is harmless
-        put = await self._store.put_if_absent(prepared.key, prepared.data, prepared.content_sha)
+        put = await self._s3_documents.put_if_absent(
+            prepared.key, prepared.data, prepared.content_sha
+        )
         if put is S3PutResult.S3_PUT_CONFLICT:
             return WriteRefused("content_conflict", known.latest_version if known else None)
         outgoing = Outgoing(request_id, EVENT_SCHEMA, prepared.event_json)
-        result = await self._repository.accept(
+        result = await self._pg_documents.accept(
             request.corpus, request.doc_id, request.version, prepared.content_sha, outgoing
         )
         return self._after_accept(result, request.doc_id, request.version)
@@ -60,13 +65,13 @@ class IngestService:
         self, doc_id: str, version: int, request_id: str
     ) -> WriteAccepted | WriteRefused:
         prepared = prepare_delete(CORPUS, doc_id, version, produced_at=self._clock())
-        known = await self._repository.known(CORPUS, doc_id)
+        known = await self._pg_documents.known(CORPUS, doc_id)
         # a delete has no content, so its sha is None and nothing goes to s3
         early = self._early_answer(precheck(version, None, known), known, doc_id, version)
         if early is not None:
             return early
         outgoing = Outgoing(request_id, EVENT_SCHEMA, prepared.event_json)
-        result = await self._repository.accept(CORPUS, doc_id, version, None, outgoing)
+        result = await self._pg_documents.accept(CORPUS, doc_id, version, None, outgoing)
         return self._after_accept(result, doc_id, version)
 
     # the four answers the precheck can give, shared by upsert and delete so they cannot drift

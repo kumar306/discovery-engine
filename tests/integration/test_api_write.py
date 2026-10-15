@@ -73,7 +73,7 @@ async def test_a_retry_after_a_crash_between_s3_and_postgres_completes_the_write
     # the first attempt got as far as s3 and then died: the object exists, postgres knows nothing
     prepared = prepare_upsert(request_for("D1", 1), NOW)
     assert (
-        await api.store.put_if_absent(prepared.key, prepared.data, prepared.content_sha)
+        await api.s3_store.put_if_absent(prepared.key, prepared.data, prepared.content_sha)
         is S3PutResult.S3_PUT_CREATED
     )
     assert document(api.database.direct_dsn, "D1") is None
@@ -113,7 +113,7 @@ async def test_a_leftover_object_with_other_content_blocks_the_version_without_a
 ) -> None:
     # a crashed attempt left other content at this version, and postgres has no row for it
     leftover = prepare_upsert(request_for("D1", 1, title="Leftover Title"), NOW)
-    await api.store.put_if_absent(leftover.key, leftover.data, leftover.content_sha)
+    await api.s3_store.put_if_absent(leftover.key, leftover.data, leftover.content_sha)
     response = await api.post("D1", 1, title="New Title")
     assert response.status_code == 409
     assert (response.json()["error"], response.json()["current_version"]) == (

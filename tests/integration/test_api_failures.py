@@ -38,7 +38,7 @@ async def test_s3_down_is_a_503_and_postgres_is_untouched(
     pool: AsyncConnectionPool, bucket: str, db: Database
 ) -> None:
     nothing_listens_here = make_store(moto_client("http://127.0.0.1:9", timeout=0.3), bucket)[0]
-    async with serving(pool, bucket, db, store=nothing_listens_here) as api:
+    async with serving(pool, bucket, db, s3_store=nothing_listens_here) as api:
         response = await api.post("D1", 1)
     assert response.status_code == 503
     assert response.headers["retry-after"] == "1"
@@ -51,7 +51,7 @@ async def test_postgres_failing_after_the_s3_write_leaves_a_harmless_object_and_
     pool: AsyncConnectionPool, bucket: str, db: Database
 ) -> None:
     broken = FailingAccept(DocumentRepository(pool), PoolTimeout("no connection in time"))
-    async with serving(pool, bucket, db, repository=broken) as api:
+    async with serving(pool, bucket, db, pg_documents=broken) as api:
         failed = await api.post("D1", 1)
         assert failed.status_code == 503
         assert failed.json()["error"] == "database_busy"
@@ -91,7 +91,7 @@ async def test_a_full_s3_bulkhead_sheds_the_next_write_at_once(
 ) -> None:
     blocking = BlockingClient(moto_client())
     store = make_store(blocking, bucket, limit=1)[0]
-    async with serving(pool, bucket, db, store=store) as api:
+    async with serving(pool, bucket, db, s3_store=store) as api:
         slow = asyncio.create_task(api.post("SLOW", 1))
         await asyncio.to_thread(blocking.entered.wait, 5)
         # bounded, so a missing bulkhead fails the test instead of waiting for the blocked write
@@ -119,7 +119,7 @@ async def test_the_admission_limit_sheds_while_s3_and_postgres_still_have_room(
     store = make_store(blocking, bucket)[0]
     settings = IngestSettings(max_inflight_requests=1, admission_wait_s=0.01)
     try:
-        async with serving(pool, bucket, db, store=store, settings=settings) as api:
+        async with serving(pool, bucket, db, s3_store=store, settings=settings) as api:
             slow = asyncio.create_task(api.post("SLOW", 1))
             await asyncio.to_thread(blocking.entered.wait, 5)
             # bounded, so a missing limit fails the test instead of waiting on the blocked write

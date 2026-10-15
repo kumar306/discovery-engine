@@ -100,9 +100,9 @@ def publish_operations(
 
 
 class ChunkIndex:
-    def __init__(self, client: AsyncQdrantClient, collection: str) -> None:
-        self._client = client
-        self._collection = collection
+    def __init__(self, qdrant_client: AsyncQdrantClient, qdrant_collection: str) -> None:
+        self._qdrant_client = qdrant_client
+        self._qdrant_collection = qdrant_collection
 
     async def stage(self, chunks: Sequence[IndexedChunk]) -> None:
         if not chunks:
@@ -124,8 +124,8 @@ class ChunkIndex:
         # because the id is made from the document, the model version and the chunk content
         # so the existing point is left alone and no new point is added for the duplicate
         # a redelivered message can never demote a point that went live back to staging
-        await self._client.upsert(
-            self._collection, points, wait=True, update_mode=models.UpdateMode.INSERT_ONLY
+        await self._qdrant_client.upsert(
+            self._qdrant_collection, points, wait=True, update_mode=models.UpdateMode.INSERT_ONLY
         )
 
     async def publish(
@@ -135,8 +135,8 @@ class ChunkIndex:
             # superseding the old chunks with nothing live in their place would hide the product
             raise ValueError("a version with no live chunks cannot be published")
         # one request, run in order, and running it twice leaves the same payloads
-        await self._client.batch_update_points(
-            self._collection,
+        await self._qdrant_client.batch_update_points(
+            self._qdrant_collection,
             update_operations=publish_operations(version, live, superseded),
             wait=True,
         )
@@ -146,8 +146,8 @@ class ChunkIndex:
         where = models.Filter(
             must=[models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id))]
         )
-        await self._client.set_payload(
-            self._collection,
+        await self._qdrant_client.set_payload(
+            self._qdrant_collection,
             {"state": QdrantPointState.QDRANT_POINT_DELETED.value},
             points=where,
             wait=True,

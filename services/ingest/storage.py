@@ -82,18 +82,18 @@ def _is_missing_object(error: Exception) -> bool:
 class DocumentStore:
     def __init__(
         self,
-        client: "S3Client",
-        bucket: str,
-        executor: ThreadPoolExecutor,
-        bulkhead: Bulkhead,
+        s3_client: "S3Client",
+        s3_bucket: str,
+        s3_executor: ThreadPoolExecutor,
+        s3_bulkhead: Bulkhead,
         policy: RetryPolicy,
         sleep: Callable[[float], Awaitable[None]],
         rng: random.Random,
     ) -> None:
-        self._client = client
-        self._bucket = bucket
-        self._executor = executor
-        self._bulkhead = bulkhead
+        self._s3_client = s3_client
+        self._s3_bucket = s3_bucket
+        self._s3_executor = s3_executor
+        self._s3_bulkhead = s3_bulkhead
         self._policy = policy
         self._sleep = sleep
         self._rng = rng
@@ -112,7 +112,7 @@ class DocumentStore:
         # request 2 now runs, takes its own permit and does the same with another thread
         # when the thread of request 1 returns S3_PUT_CREATED the loop completes the future
         # and request 1 wakes up exactly where it awaited
-        async with self._bulkhead:
+        async with self._s3_bulkhead:
             try:
                 # the lambda delays the call, arguments are evaluated before the function runs
                 # without it run_in_executor would start the s3 call before call_with_retries begins
@@ -120,7 +120,7 @@ class DocumentStore:
                 # a future cannot be rerun, so there would be no retry and no per attempt handling
                 return await call_with_retries(
                     lambda: loop.run_in_executor(
-                        self._executor, self._put_blocking, key, data, sha
+                        self._s3_executor, self._put_blocking, key, data, sha
                     ),
                     self._policy,
                     self._sleep,
@@ -132,10 +132,10 @@ class DocumentStore:
     async def get(self, key: str) -> bytes:
         loop = asyncio.get_running_loop()
         # the same bulkhead and retries as a write, one permit covers the call and its retries
-        async with self._bulkhead:
+        async with self._s3_bulkhead:
             try:
                 return await call_with_retries(
-                    lambda: loop.run_in_executor(self._executor, self._read_blocking, key),
+                    lambda: loop.run_in_executor(self._s3_executor, self._read_blocking, key),
                     self._policy,
                     self._sleep,
                     self._rng,
@@ -148,13 +148,13 @@ class DocumentStore:
                 raise StorageUnavailable(str(rejected)) from rejected.error
 
     def close(self) -> None:
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        self._s3_executor.shutdown(wait=False, cancel_futures=True)
 
     # everything below runs on a worker thread, boto3 calls block
     def _put_blocking(self, key: str, data: bytes, sha: str) -> S3PutResult:
         try:
-            self._client.put_object(
-                Bucket=self._bucket,
+            self._s3_client.put_object(
+                Bucket=self._s3_bucket,
                 Key=key,
                 Body=data,
                 ContentType="application/json",
@@ -176,7 +176,7 @@ class DocumentStore:
 
     def _read_blocking(self, key: str) -> bytes:
         try:
-            return self._client.get_object(Bucket=self._bucket, Key=key)["Body"].read()
+            return self._s3_client.get_object(Bucket=self._s3_bucket, Key=key)["Body"].read()
         except (ClientError, BotoCoreError) as error:
             raise classify(error) from error
 
@@ -201,10 +201,10 @@ def build_store(
         ),
     )
     return DocumentStore(
-        client=client,
-        bucket=settings.s3_bucket,
-        executor=ThreadPoolExecutor(max_workers=settings.s3_threads, thread_name_prefix="s3"),
-        bulkhead=Bulkhead(settings.s3_bulkhead_limit, settings.s3_bulkhead_wait_s),
+        s3_client=client,
+        s3_bucket=settings.s3_bucket,
+        s3_executor=ThreadPoolExecutor(max_workers=settings.s3_threads, thread_name_prefix="s3"),
+        s3_bulkhead=Bulkhead(settings.s3_bulkhead_limit, settings.s3_bulkhead_wait_s),
         policy=RetryPolicy(),
         sleep=sleep,
         # the rng only spreads retry waits, it protects nothing, so a plain generator is fine

@@ -28,8 +28,8 @@ class ScriptedRelay(Relay):
         self.stop = asyncio.Event()
         self.delays: list[float] = []
         super().__init__(
-            pool=None,  # type: ignore[arg-type]
-            publisher=None,  # type: ignore[arg-type]
+            pg_pool=None,  # type: ignore[arg-type]
+            kafka_publisher=None,  # type: ignore[arg-type]
             batch_size=100,
             poll_interval_s=0.5,
             sleep=self._record,

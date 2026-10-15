@@ -98,17 +98,17 @@ def _gate_state(current: int | None, indexed: int | None) -> GateState | None:
 
 
 class ChunkRepository:
-    def __init__(self, pool: AsyncConnectionPool, lock_timeout_s: float = 2.0) -> None:
-        self._pool = pool
+    def __init__(self, pg_pool: AsyncConnectionPool, lock_timeout_s: float = 2.0) -> None:
+        self._pg_pool = pg_pool
         self._lock_timeout_ms = int(lock_timeout_s * 1000)
 
     async def gate_state(self, corpus: str, doc_id: str) -> GateState | None:
-        async with self._pool.connection() as conn:
+        async with self._pg_pool.connection() as conn:
             row = await (await conn.execute(_STATE, (corpus, doc_id))).fetchone()
         return None if row is None else _gate_state(row[0], row[1])
 
     async def snapshot(self, corpus: str, doc_id: str) -> Snapshot:
-        async with self._pool.connection() as conn:
+        async with self._pg_pool.connection() as conn:
             chunks = await (await conn.execute(_CHUNKS, (corpus, doc_id))).fetchall()
             stale = await (await conn.execute(_STALE, (corpus, doc_id))).fetchall()
         current = {chunk_id: tuple(positions) for chunk_id, positions in chunks}
@@ -118,7 +118,7 @@ class ChunkRepository:
         self, corpus: str, doc_id: str, version: int, chunks: Sequence[NewChunk]
     ) -> PgCommitResult:
         ids = [chunk.chunk_id for chunk in chunks]
-        async with self._pool.connection() as conn, conn.transaction():
+        async with self._pg_pool.connection() as conn, conn.transaction():
             if not await self._lock_and_judge(conn, corpus, doc_id, version):
                 return PgCommitResult.PG_COMMIT_SKIPPED_STALE
             # why replace all, not a delta computed in python from diff_chunks
@@ -151,7 +151,7 @@ class ChunkRepository:
         return PgCommitResult.PG_COMMIT_APPLIED
 
     async def commit_delete(self, corpus: str, doc_id: str, version: int) -> PgCommitResult:
-        async with self._pool.connection() as conn, conn.transaction():
+        async with self._pg_pool.connection() as conn, conn.transaction():
             if not await self._lock_and_judge(conn, corpus, doc_id, version):
                 return PgCommitResult.PG_COMMIT_SKIPPED_STALE
             await conn.execute(_QUEUE_ALL, (corpus, doc_id))
@@ -160,7 +160,7 @@ class ChunkRepository:
         return PgCommitResult.PG_COMMIT_APPLIED
 
     async def mark_indexed(self, corpus: str, doc_id: str, version: int) -> bool:
-        async with self._pool.connection() as conn:
+        async with self._pg_pool.connection() as conn:
             row = await (
                 await conn.execute(_MARK_INDEXED, (version, corpus, doc_id, version, version))
             ).fetchone()

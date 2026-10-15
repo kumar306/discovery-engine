@@ -226,7 +226,7 @@ NOW = datetime(2026, 10, 12, 9, 30, tzinfo=UTC)
 @dataclass
 class Api:
     client: httpx.AsyncClient
-    store: DocumentStore
+    s3_store: DocumentStore
     bucket: str
     database: Database
 
@@ -279,22 +279,22 @@ async def serving(
     bucket: str,
     database: Database,
     *,
-    store: DocumentStore | None = None,
-    repository: Any = None,
+    s3_store: DocumentStore | None = None,
+    pg_documents: Any = None,
     settings: IngestSettings | None = None,
 ) -> AsyncIterator[Api]:
     settings = settings or IngestSettings()
-    store = store or make_store(moto_client(), bucket)[0]
-    repository = repository or DocumentRepository(pool, settings.db_lock_timeout_s)
-    service = IngestService(repository, store, clock=lambda: NOW)
+    s3_store = s3_store or make_store(moto_client(), bucket)[0]
+    pg_documents = pg_documents or DocumentRepository(pool, settings.db_lock_timeout_s)
+    service = IngestService(pg_documents, s3_store, clock=lambda: NOW)
     app = create_app(service, settings)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://api"
     ) as client:
         try:
-            yield Api(client, store, bucket, database)
+            yield Api(client, s3_store, bucket, database)
         finally:
-            store.close()
+            s3_store.close()
 
 
 @pytest.fixture

@@ -105,18 +105,18 @@ class Rig:
     api: Api
     pipeline: Pipeline
     embedder: HashEmbedder
-    repo: ChunkRepository
-    index: ChunkIndex
-    qdrant: AsyncQdrantClient
-    settings: EmbedSettings
+    pg_chunk_repo: ChunkRepository
+    qdrant_index: ChunkIndex
+    qdrant_client: AsyncQdrantClient
+    embed_settings: EmbedSettings
 
     def pipeline_with(self, **parts: Any) -> Pipeline:
         return Pipeline(
-            parts.get("chunks", self.repo),
-            parts.get("index", self.index),
-            parts.get("documents", self.api.store),
+            parts.get("pg_chunk_repo", self.pg_chunk_repo),
+            parts.get("qdrant_index", self.qdrant_index),
+            parts.get("s3_documents", self.api.s3_store),
             parts.get("embedder", self.embedder),
-            self.settings,
+            self.embed_settings,
         )
 
     async def ingest(self, doc_id: str, version: int, **fields: Any) -> DocEvent:
@@ -129,7 +129,7 @@ class Rig:
         return self.api.events(doc_id)[-1]  # type: ignore[no-any-return]
 
     async def points(self, doc_id: str) -> dict[uuid.UUID, dict[str, Any]]:
-        return await read_points(self.qdrant, self.settings.qdrant_collection, doc_id)
+        return await read_points(self.qdrant_client, self.embed_settings.qdrant_collection, doc_id)
 
     def row(self, doc_id: str) -> dict[str, Any]:
         found = document(self.api.database.direct_dsn, doc_id)
@@ -140,7 +140,7 @@ class Rig:
         # nothing was committed and nothing is visible
         row = self.row(doc_id)
         assert (row["current"], row["indexed"]) == (None, None)
-        snapshot = await self.repo.snapshot("esci", doc_id)
+        snapshot = await self.pg_chunk_repo.snapshot("esci", doc_id)
         assert snapshot.current == {}
         assert snapshot.stale == frozenset()
         assert not any(p["state"] == "live" for p in (await self.points(doc_id)).values())
@@ -150,11 +150,11 @@ class Rig:
 async def rig(
     api: Api, pool: AsyncConnectionPool, qdrant: AsyncQdrantClient, collection: EmbedSettings
 ) -> Rig:
-    repo = ChunkRepository(pool)
-    index = ChunkIndex(qdrant, collection.qdrant_collection)
+    pg_chunk_repo = ChunkRepository(pool)
+    qdrant_index = ChunkIndex(qdrant, collection.qdrant_collection)
     embedder = HashEmbedder(dense_dim=TEST_DIM, max_tokens=64)
-    pipeline = Pipeline(repo, index, api.store, embedder, collection)
-    return Rig(api, pipeline, embedder, repo, index, qdrant, collection)
+    pipeline = Pipeline(pg_chunk_repo, qdrant_index, api.s3_store, embedder, collection)
+    return Rig(api, pipeline, embedder, pg_chunk_repo, qdrant_index, qdrant, collection)
 
 
 def first_words(texts: list[str]) -> list[str]:
@@ -170,7 +170,7 @@ async def test_a_new_document_is_embedded_staged_committed_and_published(rig: Ri
     assert await rig.pipeline.handle(event) is DONE
     row = rig.row("P1")
     assert (row["current"], row["indexed"], row["deleted"]) == (1, 1, False)
-    snapshot = await rig.repo.snapshot("esci", "P1")
+    snapshot = await rig.pg_chunk_repo.snapshot("esci", "P1")
     assert sorted(snapshot.current.values()) == [(0,), (1,)]
     points = await rig.points("P1")
     assert set(points) == set(snapshot.current)
@@ -181,7 +181,7 @@ async def test_a_new_document_is_embedded_staged_committed_and_published(rig: Ri
             1,
             positions[0],
         )
-        assert payload["model_version"] == rig.settings.model_version
+        assert payload["model_version"] == rig.embed_settings.model_version
         assert payload["doc_id"] == "P1"
     # one call, with exactly the two chunk texts
     assert len(rig.embedder.calls) == 1
@@ -197,13 +197,13 @@ async def test_the_payload_carries_the_product_fields_a_search_filters_on(rig: R
 
 async def test_an_update_embeds_only_the_chunk_that_changed(rig: Rig) -> None:
     await rig.pipeline.handle(await rig.ingest("P1", 1))
-    before = await rig.repo.snapshot("esci", "P1")
+    before = await rig.pg_chunk_repo.snapshot("esci", "P1")
     # only the description changes
     event = await rig.ingest("P1", 2, **{**BASE, "description": words(30, "x")})
     assert await rig.pipeline.handle(event) is DONE
     assert len(rig.embedder.calls) == 2
     assert first_words(rig.embedder.calls[1]) == ["x0"]  # the bullets chunk was not embedded again
-    after = await rig.repo.snapshot("esci", "P1")
+    after = await rig.pg_chunk_repo.snapshot("esci", "P1")
     kept = set(before.current) & set(after.current)
     dropped = set(before.current) - set(after.current)
     assert len(kept) == 1  # the bullets chunk is the same point
@@ -244,7 +244,7 @@ async def test_an_older_event_is_dropped_before_anything_is_read_or_computed(rig
     await rig.pipeline.handle(second)
     log: list[str] = []
     guarded = rig.pipeline_with(
-        documents=Recorder(rig.api.store, log), embedder=Recorder(rig.embedder, log)
+        s3_documents=Recorder(rig.api.s3_store, log), embedder=Recorder(rig.embedder, log)
     )
     before = await rig.points("P1")
     assert await guarded.handle(first) is DROPPED
@@ -256,19 +256,19 @@ async def test_an_older_event_is_dropped_before_anything_is_read_or_computed(rig
 async def test_the_same_event_delivered_twice_changes_nothing_the_second_time(rig: Rig) -> None:
     event = await rig.ingest("P1", 1)
     await rig.pipeline.handle(event)
-    before = (await rig.points("P1"), await rig.repo.snapshot("esci", "P1"))
+    before = (await rig.points("P1"), await rig.pg_chunk_repo.snapshot("esci", "P1"))
     calls = len(rig.embedder.calls)
     assert await rig.pipeline.handle(event) is DROPPED
-    assert (await rig.points("P1"), await rig.repo.snapshot("esci", "P1")) == before
+    assert (await rig.points("P1"), await rig.pg_chunk_repo.snapshot("esci", "P1")) == before
     assert len(rig.embedder.calls) == calls
 
 
 async def test_the_pipeline_calls_its_parts_in_the_order_that_keeps_readers_safe(rig: Rig) -> None:
     log: list[str] = []
     recorded = rig.pipeline_with(
-        chunks=Recorder(rig.repo, log),
-        index=Recorder(rig.index, log),
-        documents=Recorder(rig.api.store, log),
+        pg_chunk_repo=Recorder(rig.pg_chunk_repo, log),
+        qdrant_index=Recorder(rig.qdrant_index, log),
+        s3_documents=Recorder(rig.api.s3_store, log),
         embedder=Recorder(rig.embedder, log),
     )
     await recorded.handle(await rig.ingest("P1", 1))
@@ -293,7 +293,9 @@ async def test_a_crash_after_staging_leaves_the_document_unchanged_and_the_retry
     rig: Rig,
 ) -> None:
     event = await rig.ingest("P1", 1)
-    crashing = rig.pipeline_with(chunks=Breaker(rig.repo, "commit_version", RuntimeError("died")))
+    crashing = rig.pipeline_with(
+        pg_chunk_repo=Breaker(rig.pg_chunk_repo, "commit_version", RuntimeError("died"))
+    )
     with pytest.raises(RuntimeError, match="died"):
         await crashing.handle(event)
     await rig.untouched("P1")
@@ -310,7 +312,9 @@ async def test_a_crash_between_the_commit_and_the_publish_is_finished_without_em
     rig: Rig,
 ) -> None:
     event = await rig.ingest("P1", 1)
-    crashing = rig.pipeline_with(index=Breaker(rig.index, "publish", RuntimeError("died")))
+    crashing = rig.pipeline_with(
+        qdrant_index=Breaker(rig.qdrant_index, "publish", RuntimeError("died"))
+    )
     with pytest.raises(RuntimeError, match="died"):
         await crashing.handle(event)
     row = rig.row("P1")
@@ -351,7 +355,7 @@ async def test_a_stored_document_that_is_not_valid_is_a_permanent_error_not_a_va
     event = await rig.ingest("P1", 1)
     assert isinstance(event, UpsertEvent)
     garbage = b'{"corpus": "esci", "title": 7'
-    await rig.api.store.put_if_absent("esci/P1/garbage.json", garbage, content_sha(garbage))
+    await rig.api.s3_store.put_if_absent("esci/P1/garbage.json", garbage, content_sha(garbage))
     broken = event.model_copy(
         update={"s3_key": "esci/P1/garbage.json", "content_sha": content_sha(garbage)}
     )
@@ -393,17 +397,17 @@ async def test_a_failing_embedder_commits_and_stages_nothing(rig: Rig) -> None:
 
 async def test_an_s3_outage_commits_nothing_and_is_not_a_missing_document(rig: Rig) -> None:
     event = await rig.ingest("P1", 1)
-    down = Breaker(rig.api.store, "get", StorageUnavailable("s3 is down"))
+    down = Breaker(rig.api.s3_store, "get", StorageUnavailable("s3 is down"))
     with pytest.raises(StorageUnavailable):
-        await rig.pipeline_with(documents=down).handle(event)
+        await rig.pipeline_with(s3_documents=down).handle(event)
     await rig.untouched("P1")
 
 
 async def test_a_qdrant_outage_while_staging_commits_nothing(rig: Rig) -> None:
     event = await rig.ingest("P1", 1)
-    down = Breaker(rig.index, "stage", ConnectionError("qdrant is down"))
+    down = Breaker(rig.qdrant_index, "stage", ConnectionError("qdrant is down"))
     with pytest.raises(ConnectionError):
-        await rig.pipeline_with(index=down).handle(event)
+        await rig.pipeline_with(qdrant_index=down).handle(event)
     await rig.untouched("P1")
     assert await rig.pipeline.handle(event) is DONE
 
@@ -415,11 +419,11 @@ async def test_a_delete_hides_the_product_queues_its_chunks_and_leaves_a_tombsto
     rig: Rig,
 ) -> None:
     await rig.pipeline.handle(await rig.ingest("P1", 1))
-    before = await rig.repo.snapshot("esci", "P1")
+    before = await rig.pg_chunk_repo.snapshot("esci", "P1")
     event = await rig.remove("P1", 2)
     assert await rig.pipeline.handle(event) is DONE
     assert {p["state"] for p in (await rig.points("P1")).values()} == {"deleted"}
-    snapshot = await rig.repo.snapshot("esci", "P1")
+    snapshot = await rig.pg_chunk_repo.snapshot("esci", "P1")
     assert (snapshot.current, snapshot.stale) == ({}, frozenset(before.current))
     row = rig.row("P1")
     assert (row["current"], row["indexed"], row["deleted"]) == (2, 2, True)
@@ -431,7 +435,9 @@ async def test_a_crash_between_the_tombstone_and_the_hiding_is_finished_on_the_r
 ) -> None:
     await rig.pipeline.handle(await rig.ingest("P1", 1))
     event = await rig.remove("P1", 2)
-    crashing = rig.pipeline_with(index=Breaker(rig.index, "mark_deleted", RuntimeError("died")))
+    crashing = rig.pipeline_with(
+        qdrant_index=Breaker(rig.qdrant_index, "mark_deleted", RuntimeError("died"))
+    )
     with pytest.raises(RuntimeError, match="died"):
         await crashing.handle(event)
     assert {p["state"] for p in (await rig.points("P1")).values()} == {"live"}  # still visible
@@ -461,7 +467,7 @@ async def test_a_newer_upload_after_a_delete_brings_the_product_back(rig: Rig) -
     points = await rig.points("P1")
     assert {p["state"] for p in points.values()} == {"live"}
     assert len(points) == 2  # the same chunks, so the same two points came back
-    snapshot = await rig.repo.snapshot("esci", "P1")
+    snapshot = await rig.pg_chunk_repo.snapshot("esci", "P1")
     assert snapshot.stale == frozenset()  # revived, so no longer waiting to be deleted
     row = rig.row("P1")
     assert (row["current"], row["indexed"], row["deleted"]) == (3, 3, False)
@@ -478,14 +484,16 @@ async def test_losing_the_race_at_the_commit_drops_the_event_and_publishes_nothi
     log: list[str] = []
     # between the gate and the commit another worker applies version 2 completely
     racing = rig.pipeline_with(
-        chunks=RaceBefore(rig.repo, "commit_version", lambda: rig.pipeline.handle(second)),
-        index=Recorder(rig.index, log),
+        pg_chunk_repo=RaceBefore(
+            rig.pg_chunk_repo, "commit_version", lambda: rig.pipeline.handle(second)
+        ),
+        qdrant_index=Recorder(rig.qdrant_index, log),
     )
     assert await racing.handle(first) is DROPPED
     assert "publish" not in log  # the loser never makes anything visible
     row = rig.row("P1")
     assert (row["current"], row["indexed"]) == (2, 2)
-    snapshot = await rig.repo.snapshot("esci", "P1")
+    snapshot = await rig.pg_chunk_repo.snapshot("esci", "P1")
     live = {cid: p for cid, p in (await rig.points("P1")).items() if p["state"] == "live"}
     assert set(live) == set(snapshot.current)
     assert {p["version"] for p in live.values()} == {2}
@@ -496,7 +504,7 @@ async def test_a_stale_delete_never_takes_the_document_lock(rig: Rig) -> None:
     old_delete = await rig.remove("P1", 2)
     await rig.pipeline.handle(await rig.ingest("P1", 3))  # a newer upload was applied first
     log: list[str] = []
-    guarded = rig.pipeline_with(chunks=Recorder(rig.repo, log))
+    guarded = rig.pipeline_with(pg_chunk_repo=Recorder(rig.pg_chunk_repo, log))
     assert await guarded.handle(old_delete) is DROPPED
     assert log == ["gate_state"]  # judged without a lock, commit_delete was never reached
 
@@ -506,10 +514,10 @@ async def test_a_chunk_that_returns_after_its_point_was_deleted_is_embedded_and_
 ) -> None:
     await rig.pipeline.handle(await rig.ingest("P1", 1))
     await rig.pipeline.handle(await rig.remove("P1", 2))
-    queued = (await rig.repo.snapshot("esci", "P1")).stale
+    queued = (await rig.pg_chunk_repo.snapshot("esci", "P1")).stale
     # the compactor deleted the points and stopped before it cleared the queue rows
-    await rig.qdrant.delete(
-        rig.settings.qdrant_collection,
+    await rig.qdrant_client.delete(
+        rig.embed_settings.qdrant_collection,
         points_selector=models.PointIdsList(points=[str(cid) for cid in queued]),
         wait=True,
     )
@@ -524,14 +532,16 @@ async def test_a_chunk_that_returns_after_its_point_was_deleted_is_embedded_and_
 
 async def test_a_new_model_version_makes_every_chunk_new(rig: Rig) -> None:
     await rig.pipeline.handle(await rig.ingest("P1", 1))
-    before = await rig.repo.snapshot("esci", "P1")
-    newer = rig.settings.model_copy(update={"model_revision": 2})
-    assert newer.model_version != rig.settings.model_version
-    other_model = Pipeline(rig.repo, rig.index, rig.api.store, rig.embedder, newer)
+    before = await rig.pg_chunk_repo.snapshot("esci", "P1")
+    newer = rig.embed_settings.model_copy(update={"model_revision": 2})
+    assert newer.model_version != rig.embed_settings.model_version
+    other_model = Pipeline(
+        rig.pg_chunk_repo, rig.qdrant_index, rig.api.s3_store, rig.embedder, newer
+    )
     # the same content in a newer version, so only the model version differs
     assert await other_model.handle(await rig.ingest("P1", 2)) is DONE
     assert [len(call) for call in rig.embedder.calls] == [2, 2]  # everything embedded again
-    after = await rig.repo.snapshot("esci", "P1")
+    after = await rig.pg_chunk_repo.snapshot("esci", "P1")
     assert set(after.current).isdisjoint(before.current)
     assert after.stale == frozenset(before.current)
     live = [p for p in (await rig.points("P1")).values() if p["state"] == "live"]

@@ -26,7 +26,7 @@ class KafkaEventResult(StrEnum):
 
 # the four things the pipeline talks to, as the small surfaces it uses, so a test can put a
 # recorder between the pipeline and the real thing and see every call in order
-class ChunkStore(Protocol):
+class PgChunkRepo(Protocol):
     async def gate_state(self, corpus: str, doc_id: str) -> GateState | None: ...
     async def snapshot(self, corpus: str, doc_id: str) -> Snapshot: ...
     async def commit_version(
@@ -36,7 +36,7 @@ class ChunkStore(Protocol):
     async def mark_indexed(self, corpus: str, doc_id: str, version: int) -> bool: ...
 
 
-class VectorIndex(Protocol):
+class QdrantIndex(Protocol):
     async def stage(self, chunks: Sequence[IndexedChunk]) -> None: ...
     async def publish(
         self, version: int, live: Sequence[LiveChunk], superseded: Sequence[UUID]
@@ -44,24 +44,24 @@ class VectorIndex(Protocol):
     async def mark_deleted(self, doc_id: str) -> None: ...
 
 
-class DocumentReader(Protocol):
+class S3DocumentReader(Protocol):
     async def get(self, key: str) -> bytes: ...
 
 
 class Pipeline:
     def __init__(
         self,
-        chunks: ChunkStore,
-        index: VectorIndex,
-        documents: DocumentReader,
+        pg_chunk_repo: PgChunkRepo,
+        qdrant_index: QdrantIndex,
+        s3_documents: S3DocumentReader,
         embedder: Embedder,
-        settings: EmbedSettings,
+        embed_settings: EmbedSettings,
     ) -> None:
-        self._chunks = chunks
-        self._index = index
-        self._documents = documents
+        self._pg_chunk_repo = pg_chunk_repo
+        self._qdrant_index = qdrant_index
+        self._s3_documents = s3_documents
         self._embedder = embedder
-        self._settings = settings
+        self._embed_settings = embed_settings
 
     async def handle(self, event: DocEvent) -> KafkaEventResult:
         """Apply one event, every step is safe to run again, an error means nothing committed."""
@@ -77,11 +77,11 @@ class Pipeline:
         product = await self._read(event)
         chunks = compose(product, self._embedder.tokenizer, self._embedder.limits)
         by_id = {
-            chunk_id(event.doc_id, self._settings.model_version, chunk.content_hash): chunk
+            chunk_id(event.doc_id, self._embed_settings.model_version, chunk.content_hash): chunk
             for chunk in chunks
         }
         # what changed against the committed chunks decides what is embedded, and only that
-        snapshot = await self._chunks.snapshot(event.corpus, event.doc_id)
+        snapshot = await self._pg_chunk_repo.snapshot(event.corpus, event.doc_id)
         diff = diff_chunks(
             {cid: chunk.positions for cid, chunk in by_id.items()},
             snapshot.current,
@@ -91,7 +91,7 @@ class Pipeline:
         # leaves the old version fully visible
         await self._stage(event, product, [(cid, by_id[cid]) for cid in diff.misses])
         # the commit, the moment the new version officially exists, judged again under the lock
-        committed = await self._chunks.commit_version(
+        committed = await self._pg_chunk_repo.commit_version(
             event.corpus,
             event.doc_id,
             event.version,
@@ -106,21 +106,21 @@ class Pipeline:
         if await self._is_stale(corpus, doc_id, version):
             return KafkaEventResult.KAFKA_EVENT_SKIPPED
         if (
-            await self._chunks.commit_delete(corpus, doc_id, version)
+            await self._pg_chunk_repo.commit_delete(corpus, doc_id, version)
             is PgCommitResult.PG_COMMIT_SKIPPED_STALE
         ):
             return KafkaEventResult.KAFKA_EVENT_SKIPPED
         # the tombstone is committed, now every point of the product goes invisible at once
-        await self._index.mark_deleted(doc_id)
-        await self._chunks.mark_indexed(corpus, doc_id, version)
+        await self._qdrant_index.mark_deleted(doc_id)
+        await self._pg_chunk_repo.mark_indexed(corpus, doc_id, version)
         return KafkaEventResult.KAFKA_EVENT_APPLIED
 
     async def _is_stale(self, corpus: str, doc_id: str, version: int) -> bool:
-        state = await self._chunks.gate_state(corpus, doc_id)
+        state = await self._pg_chunk_repo.gate_state(corpus, doc_id)
         return gate(version, state) is VersionGateDecision.VERSION_GATE_DROP
 
     async def _read(self, event: UpsertEvent) -> UpsertRequest:
-        data = await self._documents.get(event.s3_key)
+        data = await self._s3_documents.get(event.s3_key)
         if content_sha(data) != event.content_sha:
             raise PermanentError(f"{event.s3_key} does not match the sha in its event")
         try:
@@ -144,9 +144,9 @@ class Pipeline:
         if not misses:
             return
         embeddings = await self._embedder.embed(
-            [chunk.text for _, chunk in misses], self._settings.embed_timeout_s
+            [chunk.text for _, chunk in misses], self._embed_settings.embed_timeout_s
         )
-        await self._index.stage(
+        await self._qdrant_index.stage(
             [
                 IndexedChunk(
                     cid,
@@ -158,7 +158,7 @@ class Pipeline:
                         version=event.version,
                         chunk_idx=chunk.positions[0],
                         content_hash=chunk.content_hash,
-                        model_version=self._settings.model_version,
+                        model_version=self._embed_settings.model_version,
                         locale=product.locale,
                         text=chunk.text,
                         brand=product.brand,
@@ -172,10 +172,10 @@ class Pipeline:
     async def _publish(self, corpus: str, doc_id: str, version: int) -> None:
         # what goes live is read back from postgres, the record of what was committed, and not
         # taken from memory, so a replay after a crash publishes exactly the committed chunks
-        snapshot = await self._chunks.snapshot(corpus, doc_id)
+        snapshot = await self._pg_chunk_repo.snapshot(corpus, doc_id)
         live = [
             LiveChunk(cid, positions[0])
             for cid, positions in sorted(snapshot.current.items(), key=lambda item: item[1][0])
         ]
-        await self._index.publish(version, live, sorted(snapshot.stale))
-        await self._chunks.mark_indexed(corpus, doc_id, version)
+        await self._qdrant_index.publish(version, live, sorted(snapshot.stale))
+        await self._pg_chunk_repo.mark_indexed(corpus, doc_id, version)

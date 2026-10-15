@@ -335,11 +335,11 @@ def test_the_store_is_built_from_the_settings(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setenv("INGEST_S3_ENDPOINT_URL", "http://127.0.0.1:5000")
     store = build_store(IngestSettings())
     try:
-        config = store._client.meta.config
+        config = store._s3_client.meta.config
         assert (config.connect_timeout, config.read_timeout) == (1.5, 1.5)
         # our own retry policy is the only one, botocore must not retry underneath it
         assert config.retries["total_max_attempts"] == 1
         assert config.max_pool_connections == 20
-        assert store._client.meta.endpoint_url == "http://127.0.0.1:5000"
+        assert store._s3_client.meta.endpoint_url == "http://127.0.0.1:5000"
     finally:
         store.close()

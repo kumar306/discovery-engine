@@ -55,12 +55,12 @@ class AcceptResult:
 
 
 class DocumentRepository:
-    def __init__(self, pool: AsyncConnectionPool, lock_timeout_s: float = 2.0) -> None:
-        self._pool = pool
+    def __init__(self, pg_pool: AsyncConnectionPool, lock_timeout_s: float = 2.0) -> None:
+        self._pg_pool = pg_pool
         self._lock_timeout_ms = int(lock_timeout_s * 1000)
 
     async def known(self, corpus: str, doc_id: str) -> KnownDocument | None:
-        async with self._pool.connection() as conn:
+        async with self._pg_pool.connection() as conn:
             row = await (await conn.execute(_KNOWN, (corpus, doc_id))).fetchone()
         return None if row is None else KnownDocument(row[0], row[1])
 
@@ -72,7 +72,7 @@ class DocumentRepository:
         content_sha: str | None,
         outgoing: Outgoing,
     ) -> AcceptResult:
-        async with self._pool.connection() as conn:
+        async with self._pg_pool.connection() as conn:
             # the document row and its outbox row commit together or not at all
             async with conn.transaction():
                 # a writer that waits on a row lock gives up after the timeout instead of hanging
