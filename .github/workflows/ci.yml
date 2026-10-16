@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# the jobs only read the repository, so the token gets no other right
+permissions:
+  contents: read
+
+# a newer push to the same branch makes the older run pointless
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # uv run and uv sync fail when uv.lock does not match pyproject.toml, instead of quietly changing it
+  UV_LOCKED: "1"
+
+jobs:
+  # lint, types and the unit tests: no Docker, no network services
+  fast:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      # both actions are pinned to the commit of an exact release, a tag can be moved, a commit cannot
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          # the same uv as on the laptop
+          version: "0.12.24"
+          enable-cache: true
+      - name: install the locked dependencies
+        run: uv sync
+      # make test = ruff check, ruff format --check, mypy --strict, then the unit tests
+      - name: lint, types and unit tests
+        run: make test
