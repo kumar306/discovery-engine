@@ -74,6 +74,14 @@ def _set(payload: dict[str, object], where: models.Filter) -> models.SetPayloadO
     return models.SetPayloadOperation(set_payload=models.SetPayload(payload=payload, filter=where))
 
 
+# qdrant cannot flip all the points of a product at once, so for a moment a search can meet a
+# product with some chunks at version n and some at n plus 1
+# nothing here or in qdrant picks between them, qdrant returns every live chunk that matches
+# our query service does, in s6: of the live chunks of one product it keeps only those with the
+# highest version, so a changed chunk and its replacement are never shown together
+# what the rule needs from this function: new chunks go live first (never zero live chunks), and
+# every live chunk gets its version, so the rule can tell the new chunks from the old
+# no lock or lease on purpose, see docs/learning/reader_consistency.md
 def publish_operations(
     version: int, live: Sequence[LiveChunk], superseded: Sequence[UUID]
 ) -> list[models.UpdateOperation]:
