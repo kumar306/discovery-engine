@@ -117,7 +117,10 @@ async def ready(settings: EmbedSettings) -> bool:
 
 
 async def metric(settings: EmbedSettings, line: str) -> bool:
-    return line in (await get(settings, "/metrics")).text
+    try:
+        return line in (await get(settings, "/metrics")).text
+    except httpx.TransportError:  # the server is not up yet
+        return False
 
 
 class DownEmbedder(HashEmbedder):
