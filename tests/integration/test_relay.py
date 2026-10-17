@@ -2,10 +2,12 @@
 
 import asyncio
 import json
+import time
 from collections import Counter
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
+import httpx
 import psycopg
 import pytest
 from aiokafka.errors import KafkaTimeoutError
@@ -16,7 +18,7 @@ from libs.schemas.hashing import content_sha
 from services.ingest.relay import KafkaPublisher, OutboxMessage, Relay, kafka_publisher, serve
 from services.ingest.settings import IngestSettings
 
-from .conftest import Api, Database, add_events, read_topic
+from .conftest import Api, Database, add_events, eventually, free_port, read_topic
 
 BATCH = 100
 
@@ -235,7 +237,10 @@ async def test_the_server_keeps_retrying_when_kafka_is_unreachable_and_stops_whe
 ) -> None:
     add_events(db.direct_dsn, 2)
     settings = IngestSettings(
-        database_dsn=db.pooled_dsn, kafka_bootstrap="127.0.0.1:9", relay_produce_timeout_s=0.5
+        database_dsn=db.pooled_dsn,
+        kafka_bootstrap="127.0.0.1:9",
+        relay_produce_timeout_s=0.5,
+        health_port=free_port(),
     )
     stop = asyncio.Event()
     task = asyncio.create_task(serve(settings, stop, sleep=Quiet()))
@@ -253,7 +258,10 @@ async def test_the_server_publishes_a_new_row_and_shuts_down_cleanly(
     db: Database, topic: str
 ) -> None:
     settings = IngestSettings(
-        database_dsn=db.pooled_dsn, topic_events=topic, relay_poll_interval_s=0.1
+        database_dsn=db.pooled_dsn,
+        topic_events=topic,
+        relay_poll_interval_s=0.1,
+        health_port=free_port(),
     )
     stop = asyncio.Event()
     task = asyncio.create_task(serve(settings, stop))
@@ -291,3 +299,130 @@ async def test_a_write_through_the_api_arrives_on_kafka_matching_what_is_in_s3(
     assert dict(message.headers)["request_id"] == response.headers["x-request-id"].encode()
     stored = api.object_bytes(event.s3_key)
     assert (event.content_sha, event.size_bytes) == (content_sha(stored), len(stored))
+
+
+# the health endpoints and the gauge of a running relay
+
+
+async def get(settings: IngestSettings, path: str) -> httpx.Response:
+    async with httpx.AsyncClient(timeout=5) as client:
+        return await client.get(f"http://127.0.0.1:{settings.health_port}{path}")
+
+
+async def ready(settings: IngestSettings) -> bool:
+    try:
+        return (await get(settings, "/readyz")).status_code == 200
+    except httpx.TransportError:  # the server is not up yet
+        return False
+
+
+async def metrics_say(settings: IngestSettings, line: str) -> bool:
+    try:
+        return line in (await get(settings, "/metrics")).text
+    except httpx.TransportError:
+        return False
+
+
+async def test_the_relay_becomes_ready_and_reports_the_backlog_going_down(
+    db: Database, topic: str
+) -> None:
+    add_events(db.direct_dsn, 3, "BACKLOG")
+    settings = IngestSettings(
+        database_dsn=db.pooled_dsn,
+        topic_events=topic,
+        relay_poll_interval_s=0.1,
+        relay_backlog_interval_s=0.2,
+        health_port=free_port(),
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve(settings, stop))
+    try:
+        await eventually(lambda: ready(settings))
+        assert (await get(settings, "/readyz")).json() == {
+            "ready": True,
+            "checks": {"postgres": "ok", "kafka": "ok"},
+        }
+        assert (await get(settings, "/healthz")).status_code == 200
+
+        async def backlog_is_empty() -> bool:
+            return await metrics_say(settings, "outbox_backlog 0.0")
+
+        await eventually(backlog_is_empty)  # the three rows were sent, so none is waiting
+        assert published_flags(db.direct_dsn) == [True, True, True]
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=15)
+
+
+async def test_while_kafka_is_down_the_relay_stays_alive_not_ready_and_still_reports_the_backlog(
+    db: Database,
+) -> None:
+    add_events(db.direct_dsn, 2, "STUCK")
+    settings = IngestSettings(
+        database_dsn=db.pooled_dsn,
+        kafka_bootstrap="127.0.0.1:9",
+        relay_produce_timeout_s=0.5,
+        relay_backlog_interval_s=0.2,
+        # a limit of three seconds: a loop that only beats while kafka is up would die here
+        liveness_max_age_s=3.0,
+        health_port=free_port(),
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve(settings, stop, sleep=Quiet()))
+    try:
+
+        async def two_waiting() -> bool:
+            return await metrics_say(settings, "outbox_backlog 2.0")
+
+        await eventually(two_waiting)  # the gauge works exactly when the backlog is growing
+        for _ in range(9):  # four and a half seconds, longer than the limit
+            assert (await get(settings, "/healthz")).status_code == 200
+            await asyncio.sleep(0.5)
+        response = await get(settings, "/readyz")
+        assert response.status_code == 503  # restarting would not bring kafka back
+        assert response.json()["checks"] == {"postgres": "ok", "kafka": "failed: RuntimeError"}
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=15)
+
+
+async def test_a_stop_ends_the_relay_inside_the_grace_period(db: Database, topic: str) -> None:
+    settings = IngestSettings(
+        database_dsn=db.pooled_dsn,
+        topic_events=topic,
+        relay_poll_interval_s=0.1,
+        shutdown_grace_s=5,
+        health_port=free_port(),
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve(settings, stop))
+    await eventually(lambda: ready(settings))
+    started = time.monotonic()
+    stop.set()
+    await asyncio.wait_for(task, timeout=15)
+    assert time.monotonic() - started < 5
+
+
+async def test_a_batch_that_never_finishes_is_cut_off_after_the_grace_period(
+    db: Database, topic: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = asyncio.Event()
+
+    async def hangs(self: Relay) -> int:
+        started.set()
+        await asyncio.Event().wait()
+        return 0
+
+    monkeypatch.setattr(Relay, "publish_batch", hangs)
+    settings = IngestSettings(
+        database_dsn=db.pooled_dsn,
+        topic_events=topic,
+        shutdown_grace_s=0.5,
+        health_port=free_port(),
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(serve(settings, stop))
+    await asyncio.wait_for(started.wait(), timeout=20)
+    stop.set()
+    # without a grace period the loop would wait for the batch for ever, and this would time out
+    await asyncio.wait_for(task, timeout=10)

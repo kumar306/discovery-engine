@@ -1,13 +1,13 @@
 from pydantic import PositiveFloat, PositiveInt
 from pydantic_settings import SettingsConfigDict
 
-from libs.settings import KafkaSettings, PostgresSettings, S3Settings
+from libs.settings import HealthSettings, KafkaSettings, PostgresSettings, S3Settings
 
 
 # these values are only fallbacks for when an environment variable is not present in the pod
 # on the cluster every one of them is injected from a config map and wins over what is written here
 # postgres, s3 and kafka come from the shared settings, the rest belongs to the ingest service
-class IngestSettings(PostgresSettings, S3Settings, KafkaSettings):
+class IngestSettings(PostgresSettings, S3Settings, KafkaSettings, HealthSettings):
     model_config = SettingsConfigDict(env_prefix="INGEST_", env_file=None)
 
     # http, the host is only widened to all interfaces inside a container
@@ -24,3 +24,7 @@ class IngestSettings(PostgresSettings, S3Settings, KafkaSettings):
     relay_batch_size: PositiveInt = 100
     relay_poll_interval_s: PositiveFloat = 0.5
     relay_produce_timeout_s: PositiveFloat = 5.0
+    # how often the backlog gauge reads the count, it is a count over the unpublished rows
+    relay_backlog_interval_s: PositiveFloat = 5.0
+    # the relay answers health checks here, the api answers on its own port above
+    health_port: PositiveInt = 8083

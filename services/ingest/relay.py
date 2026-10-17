@@ -10,11 +10,17 @@ from typing import Protocol
 
 from aiokafka import AIOKafkaProducer
 from aiokafka.errors import KafkaError
+from prometheus_client import CollectorRegistry, Gauge
 from psycopg_pool import AsyncConnectionPool
 
 from libs.db.pool import create_pool
+from libs.observability.health import Heartbeat, create_health_app, run_health_server
 from libs.observability.logging import configure_logging
+from libs.observability.metrics import RelayMetrics
+from libs.observability.probes import postgres_probe
 from libs.resilience.retry import RetryPolicy, backoff_delay
+from libs.resilience.shutdown import run_until_stopped
+from services.ingest.probes import PublisherReadyProbe
 from services.ingest.settings import IngestSettings
 
 log = logging.getLogger("ingest.relay")
@@ -41,6 +47,9 @@ for update skip locked
 
 _MARK = "update outbox set published_at = now() where id = any(%s)"
 
+# this counts only the unsent rows, and outbox_unpublished_idx holds only those rows, so the count
+# reads that small index and never the whole table, which is why it is cheap to ask every few
+# seconds for the backlog gauge
 _BACKLOG = "select count(*) from outbox where published_at is null"
 
 
@@ -87,6 +96,33 @@ class KafkaPublisher:
                 raise result
 
 
+async def outbox_backlog(pg_pool: AsyncConnectionPool) -> int:
+    async with pg_pool.connection() as conn:
+        row = await (await conn.execute(_BACKLOG)).fetchone()
+    return int(row[0]) if row else 0
+
+
+async def report_backlog(
+    read: Callable[[], Awaitable[int]],
+    gauge: Gauge,
+    interval_s: float,
+    stop: asyncio.Event,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """Keep the backlog gauge current, on its own, so it also works while kafka is down.
+
+    The backlog grows exactly when the relay cannot send, and then the relay loop is not
+    running, so the gauge cannot be updated from inside it.
+    """
+    while not stop.is_set():
+        try:
+            gauge.set(await read())
+        except Exception:
+            # the last value stays, a count that fails is not a reason to stop reporting
+            log.exception("the outbox backlog could not be read")
+        await sleep(interval_s)
+
+
 class Relay:
     def __init__(
         self,
@@ -97,6 +133,7 @@ class Relay:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         rng: random.Random | None = None,
         policy: RetryPolicy | None = None,
+        heartbeat: Heartbeat | None = None,
     ) -> None:
         self._pg_pool = pg_pool
         self._kafka_publisher = kafka_publisher
@@ -106,6 +143,8 @@ class Relay:
         # the rng only spreads retry waits, it protects nothing, so a plain generator is fine
         self._rng = rng or random.Random()  # noqa: S311
         self._policy = policy or RetryPolicy()
+        # the loop beats every turn, the health endpoint reads the age of the last beat
+        self._heartbeat = heartbeat or Heartbeat()
 
     async def publish_batch(self) -> int:
         # the transaction stays open from the claim until the mark
@@ -121,13 +160,12 @@ class Relay:
         return len(messages)
 
     async def backlog(self) -> int:
-        async with self._pg_pool.connection() as conn:
-            row = await (await conn.execute(_BACKLOG)).fetchone()
-        return int(row[0]) if row else 0
+        return await outbox_backlog(self._pg_pool)
 
     async def run(self, stop: asyncio.Event) -> None:
         failures = 0
         while not stop.is_set():
+            self._heartbeat.beat()
             try:
                 published = await self.publish_batch()
             except Exception:
@@ -175,32 +213,66 @@ async def serve(
     stop: asyncio.Event,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
+    registry = CollectorRegistry()
+    metrics = RelayMetrics(registry)
+    heartbeat = Heartbeat()
+    kafka_ready = PublisherReadyProbe()
     pool = create_pool(settings.database_dsn, settings.db_pool_max, settings.db_pool_timeout_s)
     await pool.open(wait=True, timeout=10)
     policy = RetryPolicy()
     rng = random.Random()  # noqa: S311
     failures = 0
+    reporter: asyncio.Task[None] | None = None
     try:
-        while not stop.is_set():
-            try:
-                async with kafka_publisher(settings) as publisher:
-                    failures = 0
-                    relay = Relay(
-                        pool,
-                        publisher,
-                        settings.relay_batch_size,
-                        settings.relay_poll_interval_s,
-                        sleep,
-                    )
-                    await relay.run(stop)
-            except KafkaError:
-                # the broker was unreachable when the producer started, keep trying until stopped
-                failures += 1
-                log.warning(
-                    "kafka not reachable, retrying", extra={"fields": {"attempt": failures}}
+        health_app = create_health_app(
+            probes={"postgres": postgres_probe(pool), "kafka": kafka_ready},
+            heartbeat=heartbeat,
+            registry=registry,
+            liveness_max_age_s=settings.liveness_max_age_s,
+            readiness_cache_s=settings.readiness_cache_s,
+            probe_timeout_s=settings.probe_timeout_s,
+        )
+        async with run_health_server(health_app, settings.health_host, settings.health_port):
+            reporter = asyncio.create_task(
+                report_backlog(
+                    lambda: outbox_backlog(pool),
+                    metrics.outbox_backlog,
+                    settings.relay_backlog_interval_s,
+                    stop,
                 )
-                await sleep(backoff_delay(failures, policy, rng))
+            )
+            while not stop.is_set():
+                # beaten here as well as inside the relay loop, because while kafka is down the
+                # relay loop is not running and this loop is the only one turning, and an outage
+                # of kafka must not get the process restarted
+                heartbeat.beat()
+                try:
+                    async with kafka_publisher(settings) as publisher:
+                        failures = 0
+                        kafka_ready.mark_connected()
+                        relay = Relay(
+                            pool,
+                            publisher,
+                            settings.relay_batch_size,
+                            settings.relay_poll_interval_s,
+                            sleep,
+                            heartbeat=heartbeat,
+                        )
+                        # a stop lets the batch in hand finish, but not for longer than the
+                        # grace period, a batch that is cut off rolls back and goes out again
+                        await run_until_stopped(relay.run(stop), stop, settings.shutdown_grace_s)
+                except KafkaError:
+                    # the broker was unreachable when the producer started, keep trying until
+                    # stopped
+                    failures += 1
+                    log.warning(
+                        "kafka not reachable, retrying", extra={"fields": {"attempt": failures}}
+                    )
+                    await sleep(backoff_delay(failures, policy, rng))
     finally:
+        if reporter is not None:
+            reporter.cancel()
+            await asyncio.gather(reporter, return_exceptions=True)
         await pool.close()
 
 

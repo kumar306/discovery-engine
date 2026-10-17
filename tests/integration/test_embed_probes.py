@@ -8,8 +8,9 @@ from qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
 from libs.db.pool import create_pool
+from libs.observability.probes import postgres_probe
 from services.embed.consumer import kafka_consumer
-from services.embed.probes import KafkaAssignmentProbe, postgres_probe, qdrant_probe
+from services.embed.probes import KafkaAssignmentProbe, qdrant_probe
 from services.embed.settings import EmbedSettings
 
 from .conftest import Database

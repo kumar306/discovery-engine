@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from libs.observability.health import Heartbeat
 from libs.resilience.retry import RetryPolicy
 from services.ingest.relay import Relay
 
@@ -23,7 +24,7 @@ class MaxRandom(random.Random):
 class ScriptedRelay(Relay):
     """Each call takes the next outcome: a number is a published batch, an exception is raised."""
 
-    def __init__(self, script: list[Any]) -> None:
+    def __init__(self, script: list[Any], heartbeat: Heartbeat | None = None) -> None:
         self.script = list(script)
         self.stop = asyncio.Event()
         self.delays: list[float] = []
@@ -35,6 +36,7 @@ class ScriptedRelay(Relay):
             sleep=self._record,
             rng=MaxRandom(),
             policy=RetryPolicy(base_delay=0.1, max_delay=5.0),
+            heartbeat=heartbeat,
         )
 
     async def _record(self, seconds: float) -> None:

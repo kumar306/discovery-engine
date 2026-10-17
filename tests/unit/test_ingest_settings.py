@@ -86,3 +86,21 @@ def test_sizes_and_timeouts_must_be_positive(
     monkeypatch.setenv(name, value)
     with pytest.raises(ValidationError):
         IngestSettings()
+
+
+def test_the_relay_answers_health_checks_on_its_own_port() -> None:
+    settings = IngestSettings()
+    # the api uses 8000, the worker 8081, so the relay takes 8083
+    assert (settings.health_host, settings.health_port) == ("127.0.0.1", 8083)
+    assert settings.relay_backlog_interval_s == 5.0
+    assert (settings.readiness_cache_s, settings.probe_timeout_s) == (5.0, 1.0)
+    assert (settings.liveness_max_age_s, settings.shutdown_grace_s) == (300.0, 30.0)
+
+
+@pytest.mark.parametrize("name", ["INGEST_HEALTH_PORT", "INGEST_RELAY_BACKLOG_INTERVAL_S"])
+def test_the_relay_health_numbers_must_be_positive(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    monkeypatch.setenv(name, "0")
+    with pytest.raises(ValidationError):
+        IngestSettings()

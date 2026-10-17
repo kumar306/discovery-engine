@@ -1,21 +1,11 @@
 from aiokafka import AIOKafkaConsumer
-from psycopg_pool import AsyncConnectionPool
 from qdrant_client import AsyncQdrantClient
 
 from libs.observability.health import Probe
 
 # a probe is a function that returns when the dependency is fine and raises when it is not
 # the health app runs them, cuts them off after a timeout and shows only the type of the error
-
-
-def postgres_probe(pg_pool: AsyncConnectionPool) -> Probe:
-    async def probe() -> None:
-        # a connection from the pool and a query that reaches the database through pgbouncer,
-        # so a pool that is exhausted and a database that is down both fail here
-        async with pg_pool.connection() as conn:
-            await conn.execute("select 1")
-
-    return probe
+# the postgres probe is shared by every process and lives in libs/observability/probes.py
 
 
 def qdrant_probe(qdrant_client: AsyncQdrantClient, collection: str) -> Probe:

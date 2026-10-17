@@ -11,11 +11,12 @@ from libs.db.pool import create_pool
 from libs.observability.health import Heartbeat, create_health_app, run_health_server
 from libs.observability.logging import configure_logging
 from libs.observability.metrics import EmbedMetrics
+from libs.observability.probes import postgres_probe
 from libs.resilience.shutdown import run_until_stopped
 from services.embed.consumer import EventConsumer, kafka_consumer, kafka_dead_letter_sink
 from services.embed.embedder import Embedder, build_onnx_embedder
 from services.embed.pipeline import Pipeline
-from services.embed.probes import KafkaAssignmentProbe, postgres_probe, qdrant_probe
+from services.embed.probes import KafkaAssignmentProbe, qdrant_probe
 from services.embed.qdrant import ChunkIndex, new_client, verify_collection
 from services.embed.repository import ChunkRepository
 from services.embed.settings import EmbedSettings
