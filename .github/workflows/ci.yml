@@ -1,10 +1,9 @@
 name: ci
 
 # a push that only changes documentation runs nothing, the jobs are for code
-# the branch ci/** is only here while this workflow is being worked on, it is removed before the merge
 on:
   push:
-    branches: [main, "ci/**"]
+    branches: [main]
     paths-ignore: ["**.md", "docs/**"]
   pull_request:
     paths-ignore: ["**.md", "docs/**"]
