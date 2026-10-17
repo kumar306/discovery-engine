@@ -29,6 +29,7 @@ def build_pipeline(
     qdrant_client: AsyncQdrantClient,
     s3_store: DocumentStore,
     embedder: Embedder,
+    metrics: EmbedMetrics | None = None,
 ) -> Pipeline:
     """The four collaborators of the pipeline, each built from the settings that belong to it."""
     return Pipeline(
@@ -37,6 +38,7 @@ def build_pipeline(
         s3_store,
         embedder,
         settings,
+        metrics,
     )
 
 
@@ -76,7 +78,7 @@ async def serve(
             # the model loads here, and a model of the wrong size stops the process too
             model = embedder or build_onnx_embedder(settings)
             await model.verify()
-            pipeline = build_pipeline(settings, pg_pool, qdrant_client, s3_store, model)
+            pipeline = build_pipeline(settings, pg_pool, qdrant_client, s3_store, model, metrics)
             async with (
                 kafka_consumer(settings) as consumer,
                 kafka_dead_letter_sink(settings) as sink,

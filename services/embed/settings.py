@@ -1,18 +1,19 @@
 from pydantic import PositiveFloat, PositiveInt, computed_field
 from pydantic_settings import SettingsConfigDict
 
-from libs.settings import HealthSettings, KafkaSettings, PostgresSettings, S3Settings
+from libs.settings import (
+    HealthSettings,
+    KafkaSettings,
+    PostgresSettings,
+    QdrantSettings,
+    S3Settings,
+)
 
 
 # these values are only fallbacks for when an environment variable is not present in the pod
 # on the cluster every one of them is injected from a config map and wins over what is written here
-class EmbedSettings(PostgresSettings, S3Settings, KafkaSettings, HealthSettings):
+class EmbedSettings(PostgresSettings, S3Settings, KafkaSettings, QdrantSettings, HealthSettings):
     model_config = SettingsConfigDict(env_prefix="EMBED_", env_file=None)
-
-    qdrant_url: str = "http://127.0.0.1:6333"
-    # the collection is created by make init, the worker only verifies it at startup
-    qdrant_collection: str = "chunks_esci"
-    qdrant_timeout_s: PositiveInt = 10
 
     # the dense model and the size of its vectors, the startup check compares the two
     dense_model: str = "BAAI/bge-small-en-v1.5"

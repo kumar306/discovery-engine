@@ -43,6 +43,13 @@ class S3Settings(BaseSettings):
         return self
 
 
+class QdrantSettings(BaseSettings):
+    qdrant_url: str = "http://127.0.0.1:6333"
+    # the collection is created by make init, a process only verifies or uses it
+    qdrant_collection: str = "chunks_esci"
+    qdrant_timeout_s: PositiveInt = 10
+
+
 class HealthSettings(BaseSettings):
     # the port a process answers the platform and prometheus on, the host is only widened to all
     # interfaces inside a container

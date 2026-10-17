@@ -3,8 +3,10 @@ from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
+from prometheus_client import CollectorRegistry
 from pydantic import ValidationError
 
+from libs.observability.metrics import EmbedMetrics
 from libs.resilience.retry import PermanentError
 from libs.schemas import DocEvent, UpsertEvent, UpsertRequest
 from libs.schemas.hashing import chunk_id, content_sha
@@ -15,6 +17,14 @@ from services.embed.gate import GateState, VersionGateDecision, gate
 from services.embed.qdrant import ChunkPayload, IndexedChunk, LiveChunk
 from services.embed.repository import NewChunk, PgCommitResult, Snapshot
 from services.embed.settings import EmbedSettings
+
+
+class ChunkBeingDeleted(RuntimeError):
+    """A chunk this version needs is being deleted by the compactor, so the event waits.
+
+    It is an ordinary error to the retry policy, so it is tried again and then held, and once
+    the compactor has finished the chunk is a plain miss that is embedded and staged afresh.
+    """
 
 
 class KafkaEventResult(StrEnum):
@@ -30,7 +40,12 @@ class PgChunkRepo(Protocol):
     async def gate_state(self, corpus: str, doc_id: str) -> GateState | None: ...
     async def snapshot(self, corpus: str, doc_id: str) -> Snapshot: ...
     async def commit_version(
-        self, corpus: str, doc_id: str, version: int, chunks: Sequence[NewChunk]
+        self,
+        corpus: str,
+        doc_id: str,
+        version: int,
+        chunks: Sequence[NewChunk],
+        revived: Sequence[UUID] = (),
     ) -> PgCommitResult: ...
     async def commit_delete(self, corpus: str, doc_id: str, version: int) -> PgCommitResult: ...
     async def mark_indexed(self, corpus: str, doc_id: str, version: int) -> bool: ...
@@ -56,7 +71,9 @@ class Pipeline:
         s3_documents: S3DocumentReader,
         embedder: Embedder,
         embed_settings: EmbedSettings,
+        metrics: EmbedMetrics | None = None,
     ) -> None:
+        self._metrics = metrics or EmbedMetrics(CollectorRegistry())
         self._pg_chunk_repo = pg_chunk_repo
         self._qdrant_index = qdrant_index
         self._s3_documents = s3_documents
@@ -82,6 +99,16 @@ class Pipeline:
         }
         # what changed against the committed chunks decides what is embedded, and only that
         snapshot = await self._pg_chunk_repo.snapshot(event.corpus, event.doc_id)
+        # a chunk the compactor has claimed loses its point any moment, so it is neither reused
+        # nor staged again until the compactor is done, nothing has been embedded yet
+        # this early stop only saves the embedding, a claim can still land later, during the s3
+        # read or the staging, and the commit checks again under the lock, that check decides
+        being_deleted = snapshot.claimed_among(by_id)
+        if being_deleted:
+            self._metrics.chunk_being_deleted.inc()
+            raise ChunkBeingDeleted(
+                f"{event.doc_id}: {len(being_deleted)} chunk(s) of this version are being deleted"
+            )
         diff = diff_chunks(
             {cid: chunk.positions for cid, chunk in by_id.items()},
             snapshot.current,
@@ -96,9 +123,16 @@ class Pipeline:
             event.doc_id,
             event.version,
             [NewChunk(cid, chunk.content_hash, chunk.positions) for cid, chunk in by_id.items()],
+            diff.revived,
         )
         if committed is PgCommitResult.PG_COMMIT_SKIPPED_STALE:
             return KafkaEventResult.KAFKA_EVENT_SKIPPED
+        if committed is PgCommitResult.PG_COMMIT_CHUNKS_CHANGED:
+            # the compactor claimed or finished a chunk after the diff, so the diff is out of date
+            # nothing was committed, the staged points are invisible, so the event is tried again
+            # and the diff of the next attempt sees the chunk as a miss and embeds it afresh
+            self._metrics.chunk_being_deleted.inc()
+            raise ChunkBeingDeleted(f"{event.doc_id}: a chunk changed under the commit")
         await self._publish(event.corpus, event.doc_id, event.version)
         return KafkaEventResult.KAFKA_EVENT_APPLIED
 

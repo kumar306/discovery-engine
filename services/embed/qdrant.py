@@ -5,6 +5,7 @@ from uuid import UUID
 
 from qdrant_client import AsyncQdrantClient, models
 
+from libs.settings import QdrantSettings
 from services.embed.settings import EmbedSettings
 
 DENSE = "dense"
@@ -149,6 +150,17 @@ class ChunkIndex:
             wait=True,
         )
 
+    async def delete(self, chunk_ids: Sequence[UUID]) -> None:
+        if not chunk_ids:
+            return
+        # a filter on ids, like the flips, so a point that is already gone is not an error and
+        # a pass of the compactor that is repeated after a crash simply finds nothing to delete
+        await self._qdrant_client.delete(
+            self._qdrant_collection,
+            points_selector=models.FilterSelector(filter=_ids(chunk_ids)),
+            wait=True,
+        )
+
     async def mark_deleted(self, doc_id: str) -> None:
         # by the product id, so points in any state go invisible at once, whatever version made them
         where = models.Filter(
@@ -181,7 +193,7 @@ def _payload(payload: ChunkPayload) -> dict[str, object]:
     return fields
 
 
-def new_client(settings: EmbedSettings) -> AsyncQdrantClient:
+def new_client(settings: QdrantSettings) -> AsyncQdrantClient:
     return AsyncQdrantClient(url=settings.qdrant_url, timeout=settings.qdrant_timeout_s)
 
 

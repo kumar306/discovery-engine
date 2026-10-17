@@ -533,6 +533,7 @@ class Rig:
             parts.get("s3_documents", self.api.s3_store),
             parts.get("embedder", self.embedder),
             self.embed_settings,
+            parts.get("metrics"),
         )
 
     async def ingest(self, doc_id: str, version: int, **fields: Any) -> DocEvent:

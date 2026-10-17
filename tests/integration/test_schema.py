@@ -177,6 +177,8 @@ STALE_COLUMNS = {
     "doc_id": ("text", "NO"),
     "chunk_id": ("uuid", "NO"),
     "stale_at": ("timestamp with time zone", "NO"),
+    # null while the row waits, set while a compactor is deleting the point
+    "deletion_started_at": ("timestamp with time zone", "YES"),
 }
 
 CHUNK_ID = "00000000-0000-0000-0000-000000000001"
