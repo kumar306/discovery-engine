@@ -3,14 +3,19 @@ import signal
 import sys
 from contextlib import suppress
 
+from prometheus_client import CollectorRegistry
 from psycopg_pool import AsyncConnectionPool
 from qdrant_client import AsyncQdrantClient
 
 from libs.db.pool import create_pool
+from libs.observability.health import Heartbeat, create_health_app, run_health_server
 from libs.observability.logging import configure_logging
+from libs.observability.metrics import EmbedMetrics
+from libs.resilience.shutdown import run_until_stopped
 from services.embed.consumer import EventConsumer, kafka_consumer, kafka_dead_letter_sink
 from services.embed.embedder import Embedder, build_onnx_embedder
 from services.embed.pipeline import Pipeline
+from services.embed.probes import KafkaAssignmentProbe, postgres_probe, qdrant_probe
 from services.embed.qdrant import ChunkIndex, new_client, verify_collection
 from services.embed.repository import ChunkRepository
 from services.embed.settings import EmbedSettings
@@ -38,21 +43,49 @@ async def serve(
     settings: EmbedSettings, stop: asyncio.Event, embedder: Embedder | None = None
 ) -> None:
     """Check everything fits, then handle messages until told to stop, and close what was opened."""
+    registry = CollectorRegistry()
+    metrics = EmbedMetrics(registry)
+    heartbeat = Heartbeat()
+    kafka_ready = KafkaAssignmentProbe()
     pg_pool = create_pool(settings.database_dsn, settings.db_pool_max, settings.db_pool_timeout_s)
     await pg_pool.open(wait=True, timeout=10)
     qdrant_client = new_client(settings)
     s3_store = build_store(settings)
     model: Embedder | None = embedder
     try:
-        # a worker for another model, or a collection that is not there, must not read a message
-        # the check is made here, before the consumer exists, so nothing is ever taken off the topic
-        await verify_collection(qdrant_client, settings)
-        # the model loads here, and a model of the wrong size stops the process too
-        model = embedder or build_onnx_embedder(settings)
-        await model.verify()
-        pipeline = build_pipeline(settings, pg_pool, qdrant_client, s3_store, model)
-        async with kafka_consumer(settings) as consumer, kafka_dead_letter_sink(settings) as sink:
-            await EventConsumer(consumer, sink, pipeline, settings).run(stop)
+        health_app = create_health_app(
+            probes={
+                "postgres": postgres_probe(pg_pool),
+                "qdrant": qdrant_probe(qdrant_client, settings.qdrant_collection),
+                "kafka": kafka_ready,
+            },
+            heartbeat=heartbeat,
+            registry=registry,
+            liveness_max_age_s=settings.liveness_max_age_s,
+            readiness_cache_s=settings.readiness_cache_s,
+            probe_timeout_s=settings.probe_timeout_s,
+        )
+        # the health port opens first, so the platform can see the worker while the model loads,
+        # it is not ready until the consumer has partitions, and it closes last but one
+        async with run_health_server(health_app, settings.health_host, settings.health_port):
+            # a worker for another model, or a collection that is not there, must not read a
+            # message, the check is made here, before the consumer exists, so nothing is ever
+            # taken off the topic
+            await verify_collection(qdrant_client, settings)
+            # the model loads here, and a model of the wrong size stops the process too
+            model = embedder or build_onnx_embedder(settings)
+            await model.verify()
+            pipeline = build_pipeline(settings, pg_pool, qdrant_client, s3_store, model)
+            async with (
+                kafka_consumer(settings) as consumer,
+                kafka_dead_letter_sink(settings) as sink,
+            ):
+                kafka_ready.attach(consumer)
+                event_consumer = EventConsumer(
+                    consumer, sink, pipeline, settings, heartbeat=heartbeat, metrics=metrics
+                )
+                # a stop lets the message in hand finish, but not for longer than the grace period
+                await run_until_stopped(event_consumer.run(stop), stop, settings.shutdown_grace_s)
     finally:
         if model is not None:
             model.close()

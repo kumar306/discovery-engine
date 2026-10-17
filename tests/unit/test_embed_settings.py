@@ -106,3 +106,43 @@ def test_the_consumer_has_sane_defaults() -> None:
     assert settings.message_attempts == 3
     assert settings.stall_base_delay_s < settings.stall_max_delay_s
     assert settings.consumer_poll_ms <= 1000  # the stop signal is looked at at least once a second
+
+
+def test_the_health_endpoints_default_to_loopback_with_cautious_limits() -> None:
+    settings = EmbedSettings()
+    assert (settings.health_host, settings.health_port) == ("127.0.0.1", 8081)
+    # the answer to a readiness check is reused for a few seconds, a probe gives up after one
+    assert (settings.readiness_cache_s, settings.probe_timeout_s) == (5.0, 1.0)
+    # longer than the slowest legitimate message: embed 30 s, qdrant 10 s, three attempts
+    assert settings.liveness_max_age_s == 300.0
+    assert settings.shutdown_grace_s == 30.0
+
+
+def test_the_health_settings_can_be_overridden_for_a_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EMBED_HEALTH_HOST", "0.0.0.0")  # noqa: S104
+    monkeypatch.setenv("EMBED_HEALTH_PORT", "9100")
+    monkeypatch.setenv("EMBED_SHUTDOWN_GRACE_S", "20")
+    settings = EmbedSettings()
+    assert (settings.health_host, settings.health_port, settings.shutdown_grace_s) == (
+        "0.0.0.0",  # noqa: S104
+        9100,
+        20.0,
+    )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "EMBED_HEALTH_PORT",
+        "EMBED_READINESS_CACHE_S",
+        "EMBED_PROBE_TIMEOUT_S",
+        "EMBED_LIVENESS_MAX_AGE_S",
+        "EMBED_SHUTDOWN_GRACE_S",
+    ],
+)
+def test_the_health_numbers_must_be_positive(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    monkeypatch.setenv(name, "0")
+    with pytest.raises(ValidationError):
+        EmbedSettings()

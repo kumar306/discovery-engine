@@ -43,6 +43,23 @@ class S3Settings(BaseSettings):
         return self
 
 
+class HealthSettings(BaseSettings):
+    # the port a process answers the platform and prometheus on, the host is only widened to all
+    # interfaces inside a container
+    health_host: str = "127.0.0.1"
+    health_port: PositiveInt = 8081
+    # the answer to a readiness check is reused for a few seconds, a failure too, so a burst of
+    # requests or a dependency that is down is not asked every time
+    readiness_cache_s: PositiveFloat = 5.0
+    probe_timeout_s: PositiveFloat = 1.0
+    # how old the heartbeat of the loop may get before the process is called dead
+    # it must be longer than the slowest legitimate message, which in the worker is about three
+    # attempts of an embedding (30 s) and a qdrant call (10 s) plus the waits between them
+    liveness_max_age_s: PositiveFloat = 300.0
+    # how long a stop waits for the message in hand before it gives up on it and cancels it
+    shutdown_grace_s: PositiveFloat = 30.0
+
+
 class KafkaSettings(BaseSettings):
     kafka_bootstrap: str = "127.0.0.1:19092"
     topic_events: str = "doc.events"

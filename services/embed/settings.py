@@ -1,12 +1,12 @@
 from pydantic import PositiveFloat, PositiveInt, computed_field
 from pydantic_settings import SettingsConfigDict
 
-from libs.settings import KafkaSettings, PostgresSettings, S3Settings
+from libs.settings import HealthSettings, KafkaSettings, PostgresSettings, S3Settings
 
 
 # these values are only fallbacks for when an environment variable is not present in the pod
 # on the cluster every one of them is injected from a config map and wins over what is written here
-class EmbedSettings(PostgresSettings, S3Settings, KafkaSettings):
+class EmbedSettings(PostgresSettings, S3Settings, KafkaSettings, HealthSettings):
     model_config = SettingsConfigDict(env_prefix="EMBED_", env_file=None)
 
     qdrant_url: str = "http://127.0.0.1:6333"

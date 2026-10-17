@@ -5,12 +5,16 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Protocol
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer, TopicPartition
 from aiokafka.errors import KafkaError
+from prometheus_client import CollectorRegistry
 from pydantic import ValidationError
 
+from libs.observability.health import Heartbeat
+from libs.observability.metrics import EmbedMetrics
 from libs.resilience.retry import (
     FailureAction,
     PermanentError,
@@ -28,6 +32,15 @@ log = logging.getLogger("embed.consumer")
 
 # an error message goes into the dead letter record, so it is cut, the record must stay small
 _MAX_ERROR_CHARS = 500
+
+
+class ConsumedEventResult(StrEnum):
+    """How the consumer finished with one message, the values are those of the result label."""
+
+    CONSUMED_EVENT_APPLIED = "applied"
+    CONSUMED_EVENT_SKIPPED = "skipped"
+    CONSUMED_EVENT_DEAD_LETTERED = "dead_lettered"
+    CONSUMED_EVENT_HELD = "held"
 
 
 class EventHandler(Protocol):
@@ -90,6 +103,8 @@ class EventConsumer:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         rng: random.Random | None = None,
         clock: Callable[[], float] = time.monotonic,
+        heartbeat: Heartbeat | None = None,
+        metrics: EmbedMetrics | None = None,
     ) -> None:
         self._kafka_consumer = kafka_consumer
         # where a message that can never be applied is written, a kafka producer that sends it
@@ -101,6 +116,13 @@ class EventConsumer:
         # the rng only spreads waits, it protects nothing, so a plain generator is fine
         self._rng = rng or random.Random()  # noqa: S311
         self._clock = clock
+        # the loop beats every turn, the health endpoint reads the age of the last beat
+        self._heartbeat = heartbeat or Heartbeat(clock)
+        self._metrics = metrics or EmbedMetrics(CollectorRegistry())
+        # when each partition was first held for the message it is stuck on, it leaves here only
+        # when that message goes through, so its age is the whole time it has been stuck and not
+        # the time since the latest retry
+        self._held_since: dict[TopicPartition, float] = {}
         # tries for one message before it is given up on
         self._attempt_policy = RetryPolicy(max_attempts=settings.message_attempts)
         # the wait before a held partition is tried again, only its delays are used
@@ -117,7 +139,9 @@ class EventConsumer:
 
     async def run(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
+            self._heartbeat.beat()
             self._resume_the_partitions_that_are_due()
+            self._report_holds()
             # one message at a time, and a poll that finds nothing returns after the timeout, so
             # the loop keeps polling while partitions are held, which keeps the group membership
             # alive and gives the timers and the stop signal their turn
@@ -127,14 +151,19 @@ class EventConsumer:
                     await self._process(partition, message)
 
     async def _process(self, partition: TopicPartition, message: Any) -> None:
-        if await self._can_commit(message):
+        started = self._clock()
+        result = await self._handle(message)
+        self._metrics.event_seconds.observe(self._clock() - started)
+        self._metrics.events.labels(result=result.value).inc()
+        if result is ConsumedEventResult.CONSUMED_EVENT_HELD:
+            self._hold(partition, message)
+        else:
             await self._commit(partition, message.offset + 1)
             self._times_held_in_a_row.pop(partition, None)
-        else:
-            self._hold(partition, message)
+            self._held_since.pop(partition, None)
 
-    async def _can_commit(self, message: Any) -> bool:
-        """True when the message is finished: applied, skipped, or safely dead lettered."""
+    async def _handle(self, message: Any) -> ConsumedEventResult:
+        """Finished (applied, skipped, safely dead lettered) or held, which leaves the offset."""
         where = {"topic": message.topic, "partition": message.partition, "offset": message.offset}
         if message.value is None:
             return await self._dead_letter(message, PermanentError("an event without a body"), 0)
@@ -165,22 +194,33 @@ class EventConsumer:
                     }
                 },
             )
-            return False
+            return ConsumedEventResult.CONSUMED_EVENT_HELD
         log.info("message handled", extra={"fields": {**where, "result": result.value}})
-        return True
+        if result is KafkaEventResult.KAFKA_EVENT_APPLIED:
+            return ConsumedEventResult.CONSUMED_EVENT_APPLIED
+        return ConsumedEventResult.CONSUMED_EVENT_SKIPPED
 
-    async def _dead_letter(self, message: Any, error: Exception, attempts: int) -> bool:
+    async def _dead_letter(
+        self, message: Any, error: Exception, attempts: int
+    ) -> ConsumedEventResult:
         try:
             await self._dlq_sink.publish(dead_letter_for(message, error, attempts))
         except Exception:
             # the record is not written, so the offset must not move, the message is never dropped
             log.exception("dead letter record not written, the message is held")
-            return after_dead_letter(published=False) is FailureAction.FAILURE_COMMIT_OFFSET
+            return self._settled(after_dead_letter(published=False))
         log.warning(
             "message dead lettered",
             extra={"fields": {"offset": message.offset, "error": type(error).__name__}},
         )
-        return after_dead_letter(published=True) is FailureAction.FAILURE_COMMIT_OFFSET
+        self._metrics.dead_letters.labels(error_type=type(error).__name__).inc()
+        return self._settled(after_dead_letter(published=True))
+
+    @staticmethod
+    def _settled(action: FailureAction) -> ConsumedEventResult:
+        if action is FailureAction.FAILURE_COMMIT_OFFSET:
+            return ConsumedEventResult.CONSUMED_EVENT_DEAD_LETTERED
+        return ConsumedEventResult.CONSUMED_EVENT_HELD
 
     async def _commit(self, partition: TopicPartition, offset: int) -> None:
         try:
@@ -195,9 +235,18 @@ class EventConsumer:
         # the partition resumes, the other partitions keep going and the order of this one stays
         self._kafka_consumer.pause(partition)
         self._kafka_consumer.seek(partition, message.offset)
+        self._held_since.setdefault(partition, self._clock())
         self._times_held_in_a_row[partition] = self._times_held_in_a_row.get(partition, 0) + 1
         wait = backoff_delay(self._times_held_in_a_row[partition], self._hold_policy, self._rng)
         self._resume_at[partition] = self._clock() + wait
+
+    def _report_holds(self) -> None:
+        # set on every turn, so the gauges are at most one poll interval old when prometheus reads
+        now = self._clock()
+        self._metrics.held_partitions.set(len(self._held_since))
+        self._metrics.oldest_hold_age.set(
+            max((now - since for since in self._held_since.values()), default=0.0)
+        )
 
     def _resume_the_partitions_that_are_due(self) -> None:
         # not a timer: it runs once per turn of the loop, and a turn lasts at most one poll

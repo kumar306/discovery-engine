@@ -15,7 +15,9 @@ from typing import Any
 
 import pytest
 from aiokafka.errors import KafkaError
+from prometheus_client import CollectorRegistry
 
+from libs.observability.metrics import EmbedMetrics
 from libs.schemas import DocEvent, UpsertEvent
 from services.embed.consumer import (
     DeadLetter,
@@ -71,6 +73,7 @@ async def running_worker(
     handler: EventHandler,
     settings: EmbedSettings,
     wrap_sink: Callable[[DeadLetterSink], DeadLetterSink] | None = None,
+    registry: CollectorRegistry | None = None,
 ) -> AsyncIterator[Worker]:
     stop = asyncio.Event()
     async with kafka_consumer(settings) as consumer, kafka_dead_letter_sink(settings) as sink:
@@ -81,6 +84,7 @@ async def running_worker(
             settings,
             sleep=no_wait,
             rng=random.Random(1),
+            metrics=EmbedMetrics(registry) if registry else None,
         )
         task = asyncio.create_task(event_consumer.run(stop))
         worker = Worker(event_consumer, task, stop, settings)
@@ -358,3 +362,46 @@ async def test_a_stop_while_idle_ends_the_loop_promptly(topic: str, dlq_topic: s
         started = asyncio.get_running_loop().time()
         await worker.finish()
     assert asyncio.get_running_loop().time() - started < 3
+
+
+async def test_the_counters_follow_a_real_run_with_a_good_a_bad_and_a_failing_message(
+    topic: str, dlq_topic: str
+) -> None:
+    registry = CollectorRegistry()
+    recovered = asyncio.Event()
+
+    async def partition_one_is_down_until_it_recovers(
+        event: DocEvent, call: int
+    ) -> KafkaEventResult:
+        if event.doc_id == "C" and not recovered.is_set():
+            raise EmbedTransient("qdrant is not answering")
+        return APPLIED
+
+    handler = Scripted(partition_one_is_down_until_it_recovers)
+    await produce(topic, event_bytes("A", 1), b"A", partition=0)
+    await produce(topic, b"this is not an event", b"B", partition=0)
+    await produce(topic, event_bytes("C", 1), b"C", partition=1)
+    async with running_worker(handler, settings_for(topic, dlq_topic), registry=registry) as worker:
+        await eventually(lambda: _has({0: 2}, worker))
+        sample = registry.get_sample_value
+        assert sample("embed_events_total", {"result": "applied"}) == 1
+        assert sample("embed_events_total", {"result": "dead_lettered"}) == 1
+        assert sample("embed_dead_letters_total", {"error_type": "PermanentError"}) == 1
+
+        async def partition_one_is_held() -> bool:
+            return sample("embed_held_partitions") == 1
+
+        await eventually(partition_one_is_held)
+
+        async def the_hold_has_an_age() -> bool:
+            return (sample("embed_oldest_hold_age_seconds") or 0) > 0
+
+        await eventually(the_hold_has_an_age)
+        recovered.set()
+        await eventually(lambda: _has({0: 2, 1: 1}, worker))
+
+        async def nothing_is_held() -> bool:
+            return sample("embed_held_partitions") == 0
+
+        await eventually(nothing_is_held)
+        assert sample("embed_oldest_hold_age_seconds") == 0

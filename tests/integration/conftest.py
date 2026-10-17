@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import random
+import socket
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -336,6 +337,14 @@ async def topic() -> AsyncIterator[str]:
 async def dlq_topic() -> AsyncIterator[str]:
     async with temporary_topic("doc.events.dlq.test") as name:
         yield name
+
+
+def free_port() -> int:
+    """A port nobody listens on right now, for a test that starts a server of its own."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port: int = sock.getsockname()[1]
+    return port
 
 
 async def produce(
