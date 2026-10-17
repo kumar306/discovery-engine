@@ -1,3 +1,15 @@
+from libs.observability.health import Probe
+from services.ingest.storage import DocumentStore
+
+
+def s3_probe(store: DocumentStore) -> Probe:
+    async def probe() -> None:
+        # the bucket answers, a missing bucket or a refused access fails here as well
+        await store.ping()
+
+    return probe
+
+
 class PublisherReadyProbe:
     """Ready once the relay has started a producer.
 

@@ -6,10 +6,13 @@ from datetime import UTC, datetime
 
 import uvicorn
 from fastapi import FastAPI
+from prometheus_client import CollectorRegistry
 
 from libs.db.pool import create_pool
 from libs.observability.logging import configure_logging
+from libs.observability.probes import postgres_probe
 from services.ingest.app import create_app
+from services.ingest.probes import s3_probe
 from services.ingest.repository import DocumentRepository
 from services.ingest.service import IngestService
 from services.ingest.settings import IngestSettings
@@ -42,7 +45,11 @@ def build(settings: IngestSettings | None = None) -> FastAPI:
     # create_app hands it to FastAPI which stores it, nothing runs at this point
     # uvicorn is given the app that build returns, so it carries the lifespan
     # and runs it when the server starts and again when it stops
-    return create_app(service, settings, lifespan=lifespan)
+    # readiness asks the two things the api cannot work without, like the other processes do
+    probes = {"postgres": postgres_probe(pool), "s3": s3_probe(store)}
+    return create_app(
+        service, settings, lifespan=lifespan, probes=probes, registry=CollectorRegistry()
+    )
 
 
 if __name__ == "__main__":

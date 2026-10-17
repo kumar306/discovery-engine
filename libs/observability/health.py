@@ -82,6 +82,43 @@ class ReadinessChecker:
         return "ok"
 
 
+def add_health_routes(
+    app: FastAPI,
+    *,
+    probes: Mapping[str, Probe],
+    registry: CollectorRegistry,
+    alive: Callable[[], bool],
+    readiness_cache_s: float,
+    probe_timeout_s: float,
+    clock: Clock = time.monotonic,
+) -> None:
+    """Add /healthz, /readyz and /metrics to an app, so a process that serves traffic on its
+    own port and a process that only needs a health port define them once.
+
+    alive says whether the process is alive: a loop process answers with the age of its
+    heartbeat, an http service answers True, because if its event loop were stuck this route
+    would not answer at all and that is what makes the platform restart it.
+    """
+    checker = ReadinessChecker(probes, probe_timeout_s, readiness_cache_s, clock)
+
+    @app.get("/healthz", include_in_schema=False)
+    async def healthz() -> JSONResponse:
+        # shallow on purpose: only "is the process turning", a dependency being down must
+        # not fail this, restarting the process would not fix it
+        is_alive = alive()
+        return JSONResponse({"alive": is_alive}, status_code=200 if is_alive else 503)
+
+    @app.get("/readyz", include_in_schema=False)
+    async def readyz() -> JSONResponse:
+        report = await checker.check()
+        body = {"ready": report.ready, "checks": report.checks}
+        return JSONResponse(body, status_code=200 if report.ready else 503)
+
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics() -> Response:
+        return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
+
+
 def create_health_app(
     *,
     probes: Mapping[str, Probe],
@@ -94,25 +131,15 @@ def create_health_app(
 ) -> FastAPI:
     # no docs pages: this port is for the platform and prometheus, not for people
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-    checker = ReadinessChecker(probes, probe_timeout_s, readiness_cache_s, clock)
-
-    @app.get("/healthz")
-    async def healthz() -> JSONResponse:
-        # shallow on purpose: only "is the loop still turning", a dependency being down must
-        # not fail this, restarting the process would not fix it
-        alive = heartbeat.age() <= liveness_max_age_s
-        return JSONResponse({"alive": alive}, status_code=200 if alive else 503)
-
-    @app.get("/readyz")
-    async def readyz() -> JSONResponse:
-        report = await checker.check()
-        body = {"ready": report.ready, "checks": report.checks}
-        return JSONResponse(body, status_code=200 if report.ready else 503)
-
-    @app.get("/metrics")
-    async def metrics() -> Response:
-        return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
-
+    add_health_routes(
+        app,
+        probes=probes,
+        registry=registry,
+        alive=lambda: heartbeat.age() <= liveness_max_age_s,
+        readiness_cache_s=readiness_cache_s,
+        probe_timeout_s=probe_timeout_s,
+        clock=clock,
+    )
     return app
 
 

@@ -11,6 +11,31 @@ from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 EVENT_SECONDS_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0)
 
 
+# an api call takes milliseconds when it is refused and some seconds when s3 or postgres is slow
+REQUEST_SECONDS_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0)
+
+
+class IngestMetrics:
+    """What the ingest api counts, one series per route and status class, never per document."""
+
+    def __init__(self, registry: CollectorRegistry) -> None:
+        # route: the route template such as /v1/documents/{doc_id}, or other when none matched
+        # status_class: 2xx, 4xx or 5xx
+        self.requests = Counter(
+            "ingest_requests_total",
+            "Requests answered by the ingest api.",
+            ["route", "status_class"],
+            registry=registry,
+        )
+        self.request_seconds = Histogram(
+            "ingest_request_seconds",
+            "Time to answer one request.",
+            ["route"],
+            buckets=REQUEST_SECONDS_BUCKETS,
+            registry=registry,
+        )
+
+
 class EmbedMetrics:
     """What the indexing worker counts."""
 

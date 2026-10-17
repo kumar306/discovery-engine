@@ -147,6 +147,16 @@ class DocumentStore:
                     raise MissingObject(key) from rejected.error
                 raise StorageUnavailable(str(rejected)) from rejected.error
 
+    async def ping(self) -> None:
+        """Ask s3 whether the bucket is there, for the readiness probe.
+
+        No bulkhead permit and no retries: the probe has its own timeout and its answer is cached,
+        and the bulkhead leaves a share of the threads free, which is where this call runs, so a
+        busy api can still be asked.
+        """
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(self._s3_executor, self._ping_blocking)
+
     def close(self) -> None:
         self._s3_executor.shutdown(wait=False, cancel_futures=True)
 
@@ -173,6 +183,12 @@ class DocumentStore:
             if content_sha(existing) == sha
             else S3PutResult.S3_PUT_CONFLICT
         )
+
+    def _ping_blocking(self) -> None:
+        try:
+            self._s3_client.head_bucket(Bucket=self._s3_bucket)
+        except (ClientError, BotoCoreError) as error:
+            raise classify(error) from error
 
     def _read_blocking(self, key: str) -> bytes:
         try:

@@ -5,7 +5,12 @@ from typing import Any
 import pytest
 from prometheus_client import CollectorRegistry
 
-from libs.observability.metrics import EmbedMetrics, MaintenanceMetrics, RelayMetrics
+from libs.observability.metrics import (
+    EmbedMetrics,
+    IngestMetrics,
+    MaintenanceMetrics,
+    RelayMetrics,
+)
 
 # name (without the _total suffix prometheus adds to counters) -> (type, label names)
 EMBED: dict[str, tuple[str, tuple[str, ...]]] = {
@@ -25,6 +30,10 @@ MAINTENANCE: dict[str, tuple[str, tuple[str, ...]]] = {
 RELAY: dict[str, tuple[str, tuple[str, ...]]] = {
     "outbox_backlog": ("gauge", ()),
 }
+INGEST: dict[str, tuple[str, tuple[str, ...]]] = {
+    "ingest_requests": ("counter", ("route", "status_class")),
+    "ingest_request_seconds": ("histogram", ("route",)),
+}
 
 
 def families(registry: CollectorRegistry) -> dict[str, str]:
@@ -33,7 +42,12 @@ def families(registry: CollectorRegistry) -> dict[str, str]:
 
 @pytest.mark.parametrize(
     ("build", "expected"),
-    [(EmbedMetrics, EMBED), (MaintenanceMetrics, MAINTENANCE), (RelayMetrics, RELAY)],
+    [
+        (EmbedMetrics, EMBED),
+        (MaintenanceMetrics, MAINTENANCE),
+        (RelayMetrics, RELAY),
+        (IngestMetrics, INGEST),
+    ],
 )
 def test_each_process_exposes_exactly_the_agreed_metrics(
     build: Any, expected: dict[str, tuple[str, tuple[str, ...]]]

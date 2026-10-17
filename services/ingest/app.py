@@ -2,21 +2,26 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, nullcontext
 from typing import Any, Protocol
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
+from prometheus_client import CollectorRegistry
 from psycopg import OperationalError
 from psycopg.errors import LockNotAvailable
 from psycopg_pool import PoolTimeout
 from pydantic import TypeAdapter, ValidationError
+from starlette.routing import Match
 
+from libs.observability.health import Probe, add_health_routes
 from libs.observability.logging import request_id_var
+from libs.observability.metrics import IngestMetrics
 from libs.resilience.bulkhead import Bulkhead, Overloaded
 from libs.schemas import UpsertRequest
 from libs.schemas.documents import MAX_VERSION, DocId
+from services.ingest.api_models import AcceptedBody, ErrorBody, ValidationFailedBody
 from services.ingest.service import WriteAccepted, WriteRefused
 from services.ingest.settings import IngestSettings
 from services.ingest.storage import StorageUnavailable
@@ -32,6 +37,100 @@ _DOC_ID = TypeAdapter(DocId)
 _VERSION = re.compile(r"[0-9]{1,19}")
 
 type Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
+
+# these answer on the traffic port, take no admission slot and are not counted as traffic
+_PLATFORM_PATHS = frozenset({"/healthz", "/readyz", "/metrics"})
+
+_RETRY_AFTER = {
+    "Retry-After": {
+        "description": "Seconds to wait before trying again.",
+        "schema": {"type": "integer"},
+    }
+}
+
+# the upsert route reads the raw body itself, to cap its size before parsing, so fastapi sees no
+# body model, this adds the request body to the openapi document, by reference to the model
+_UPSERT_BODY = {
+    "requestBody": {
+        "required": True,
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UpsertRequest"}}},
+    }
+}
+
+_UPSERT_RESPONSES: dict[int | str, dict[str, Any]] = {
+    202: {"model": AcceptedBody, "description": "Accepted: durable, not yet searchable."},
+    409: {"model": ErrorBody, "description": "A newer version is held, or this one differs."},
+    413: {"model": ErrorBody, "description": "The body is bigger than the limit."},
+    422: {"model": ValidationFailedBody, "description": "A field breaks the rules."},
+    503: {
+        "model": ErrorBody,
+        "description": "Overloaded or a dependency is down.",
+        "headers": _RETRY_AFTER,
+    },
+}
+
+# the delete route reads its two inputs itself, like the upsert route reads its body, so that a
+# missing or wrong one is answered in our own error format and not in fastapi's, which means
+# fastapi cannot describe them, they are described here, and the contract test holds the
+# description to the code
+_DELETE_PARAMETERS = {
+    "parameters": [
+        {
+            "name": "doc_id",
+            "in": "path",
+            "required": True,
+            "schema": _DOC_ID.json_schema(),
+        },
+        {
+            "name": "version",
+            "in": "query",
+            "required": True,
+            "schema": {"type": "integer", "minimum": 0, "maximum": MAX_VERSION},
+        },
+    ]
+}
+
+_DELETE_RESPONSES: dict[int | str, dict[str, Any]] = {
+    202: {"model": AcceptedBody, "description": "Accepted: the tombstone is durable."},
+    409: {"model": ErrorBody, "description": "A newer version is held."},
+    422: {"model": ValidationFailedBody, "description": "The id or the version is wrong."},
+    503: {
+        "model": ErrorBody,
+        "description": "Overloaded or a dependency is down.",
+        "headers": _RETRY_AFTER,
+    },
+}
+
+
+def _route_label(request: Request) -> str:
+    # the route template, not the path, a path with a document id in it would make a new series
+    # for every document, and a path that matched no route is one label for all of them
+    route = request.scope.get("route")
+    if route is not None:
+        return str(route.path)
+    # a request that was shed by the admission limit never reached the router, so the scope has
+    # no route yet, it is matched here, otherwise the shed requests of every route would be
+    # counted as other and a dashboard could not show which route is being shed
+    for candidate in request.app.routes:
+        if candidate.matches(request.scope)[0] is Match.FULL:
+            return str(candidate.path)
+    return "other"
+
+
+def _document_the_request_body(app: FastAPI) -> None:
+    """Put the UpsertRequest model into the openapi document that the upsert route points at."""
+    original = app.openapi
+
+    def openapi() -> dict[str, Any]:
+        schema = original()
+        schemas = schema.setdefault("components", {}).setdefault("schemas", {})
+        if "UpsertRequest" not in schemas:
+            model = UpsertRequest.model_json_schema(ref_template="#/components/schemas/{model}")
+            schemas.update(model.pop("$defs", {}))
+            schemas["UpsertRequest"] = model
+        return schema
+
+    app.openapi = openapi  # type: ignore[method-assign]
 
 
 class IngestPort(Protocol):
@@ -129,8 +228,25 @@ def create_app(
     settings: IngestSettings,
     lifespan: Lifespan | None = None,
     admission: Bulkhead | None = None,
+    probes: Mapping[str, Probe] | None = None,
+    registry: CollectorRegistry | None = None,
 ) -> FastAPI:
     app = FastAPI(title="ingest api", lifespan=lifespan)
+    registry = registry or CollectorRegistry()
+    metrics = IngestMetrics(registry)
+    # the health routes are on the traffic port on purpose: a probe on a separate port could stay
+    # green while the port that serves the clients is stuck
+    # being full is not unhealthy, shedding load is the api doing its job, so readiness looks at
+    # the dependencies only, and taking a full pod out of rotation would push its load onto the rest
+    add_health_routes(
+        app,
+        probes=probes or {},
+        registry=registry,
+        alive=lambda: True,
+        readiness_cache_s=settings.readiness_cache_s,
+        probe_timeout_s=settings.probe_timeout_s,
+    )
+    _document_the_request_body(app)
     # the outermost limit, requests being served at once, separate from the s3 and database limits
     admission = admission or Bulkhead(settings.max_inflight_requests, settings.admission_wait_s)
 
@@ -176,6 +292,12 @@ def create_app(
                     },
                 )
             response.headers["X-Request-ID"] = request_id
+            elapsed = time.perf_counter() - started
+            if request.url.path not in _PLATFORM_PATHS:
+                route = _route_label(request)
+                status_class = f"{response.status_code // 100}xx"
+                metrics.requests.labels(route=route, status_class=status_class).inc()
+                metrics.request_seconds.labels(route=route).observe(elapsed)
             state = request.state
             log.info(
                 "request",
@@ -185,7 +307,7 @@ def create_app(
                         "path": request.url.path,
                         "status": response.status_code,
                         "outcome": getattr(state, "outcome", str(response.status_code)),
-                        "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                        "duration_ms": round(elapsed * 1000, 2),
                         "doc_id": getattr(state, "doc_id", None),
                         "version": getattr(state, "version", None),
                     }
@@ -253,15 +375,27 @@ def create_app(
             },
         )
 
-    @app.post("/v1/documents", status_code=202)
+    @app.post(
+        "/v1/documents",
+        status_code=202,
+        responses=_UPSERT_RESPONSES,
+        openapi_extra=_UPSERT_BODY,
+    )
     async def upsert(request: Request) -> JSONResponse:
         document = _parse_upsert(await _read_body(request, settings.max_body_bytes))
         request.state.doc_id, request.state.version = document.doc_id, document.version
         return answer(request, await service.upsert(document, request.state.request_id))
 
-    @app.delete("/v1/documents/{doc_id}", status_code=202)
-    async def delete(request: Request, doc_id: str, version: str | None = None) -> JSONResponse:
-        doc_id, number = _parse_delete(doc_id, version)
+    @app.delete(
+        "/v1/documents/{doc_id}",
+        status_code=202,
+        responses=_DELETE_RESPONSES,
+        openapi_extra=_DELETE_PARAMETERS,
+    )
+    async def delete(request: Request) -> JSONResponse:
+        doc_id, number = _parse_delete(
+            request.path_params["doc_id"], request.query_params.get("version")
+        )
         request.state.doc_id, request.state.version = doc_id, number
         return answer(request, await service.delete(doc_id, number, request.state.request_id))
 
