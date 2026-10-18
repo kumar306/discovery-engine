@@ -35,6 +35,12 @@ _KNOWN = (
 )
 
 
+_STATUS = """
+select latest_version, current_version, indexed_version, deleted
+  from documents where corpus = %s and doc_id = %s
+"""
+
+
 class PgWriteResult(StrEnum):
     PG_WRITE_APPLIED = "accepted"
     PG_WRITE_DUPLICATE = "duplicate"
@@ -54,6 +60,14 @@ class AcceptResult:
     latest_version: int
 
 
+@dataclass(frozen=True)
+class DocumentStatus:
+    latest_version: int
+    current_version: int | None
+    indexed_version: int | None
+    deleted: bool
+
+
 class DocumentRepository:
     def __init__(self, pg_pool: AsyncConnectionPool, lock_timeout_s: float = 2.0) -> None:
         self._pg_pool = pg_pool
@@ -63,6 +77,11 @@ class DocumentRepository:
         async with self._pg_pool.connection() as conn:
             row = await (await conn.execute(_KNOWN, (corpus, doc_id))).fetchone()
         return None if row is None else KnownDocument(row[0], row[1])
+
+    async def status(self, corpus: str, doc_id: str) -> DocumentStatus | None:
+        async with self._pg_pool.connection() as conn:
+            row = await (await conn.execute(_STATUS, (corpus, doc_id))).fetchone()
+        return None if row is None else DocumentStatus(row[0], row[1], row[2], row[3])
 
     async def accept(
         self,

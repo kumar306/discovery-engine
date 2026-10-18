@@ -14,6 +14,19 @@ class AcceptedBody(BaseModel):
     accepted_at: datetime
 
 
+class DocumentStatusBody(BaseModel):
+    request_id: str
+    doc_id: str
+    # newest version the api accepted
+    latest_version: int
+    # newest version the worker committed, null until the worker has handled one
+    current_version: int | None
+    # newest version live in qdrant, null until one is searchable
+    indexed_version: int | None
+    # true when the newest version the worker committed is a delete
+    deleted: bool
+
+
 class ErrorBody(BaseModel):
     error: str
     message: str

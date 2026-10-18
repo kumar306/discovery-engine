@@ -5,7 +5,13 @@ from typing import Literal
 
 from libs.schemas import UpsertRequest
 from services.ingest.events import EVENT_SCHEMA, prepare_delete, prepare_upsert
-from services.ingest.repository import AcceptResult, DocumentRepository, Outgoing, PgWriteResult
+from services.ingest.repository import (
+    AcceptResult,
+    DocumentRepository,
+    DocumentStatus,
+    Outgoing,
+    PgWriteResult,
+)
 from services.ingest.rules import KnownDocument, WritePrecheck, precheck
 from services.ingest.storage import DocumentStore, S3PutResult
 
@@ -73,6 +79,9 @@ class IngestService:
         outgoing = Outgoing(request_id, EVENT_SCHEMA, prepared.event_json)
         result = await self._pg_documents.accept(CORPUS, doc_id, version, None, outgoing)
         return self._after_accept(result, doc_id, version)
+
+    async def status(self, doc_id: str) -> DocumentStatus | None:
+        return await self._pg_documents.status(CORPUS, doc_id)
 
     # the four answers the precheck can give, shared by upsert and delete so they cannot drift
     # returns None when the write may go on

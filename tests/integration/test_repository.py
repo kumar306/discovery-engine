@@ -10,7 +10,13 @@ import pytest
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
 from libs.db.pool import create_pool
-from services.ingest.repository import AcceptResult, DocumentRepository, Outgoing, PgWriteResult
+from services.ingest.repository import (
+    AcceptResult,
+    DocumentRepository,
+    DocumentStatus,
+    Outgoing,
+    PgWriteResult,
+)
 from services.ingest.rules import KnownDocument
 
 from .conftest import APP_POOL_SIZE, Database, document, outbox, wait_until_a_writer_is_blocked
@@ -54,6 +60,25 @@ async def test_an_unknown_document_is_accepted_and_then_known(
     row = document(db.direct_dsn, "D1")
     assert row is not None
     assert (row["latest"], row["sha"], row["current"], row["indexed"]) == (3, SHA_A, None, None)
+
+
+async def test_the_status_of_an_unknown_document_is_none(pool: AsyncConnectionPool) -> None:
+    assert await DocumentRepository(pool).status("esci", "D1") is None
+
+
+async def test_the_status_follows_a_document_through_the_worker_stages(
+    pool: AsyncConnectionPool, db: Database
+) -> None:
+    repo = DocumentRepository(pool)
+    await accept(pool, "D1", 3)
+    assert await repo.status("esci", "D1") == DocumentStatus(3, None, None, False)
+    # the worker commits version 3, then publishes it
+    with psycopg.connect(db.direct_dsn) as conn:
+        conn.execute("update documents set current_version = 3 where doc_id = 'D1'")
+    assert await repo.status("esci", "D1") == DocumentStatus(3, 3, None, False)
+    with psycopg.connect(db.direct_dsn) as conn:
+        conn.execute("update documents set indexed_version = 3 where doc_id = 'D1'")
+    assert await repo.status("esci", "D1") == DocumentStatus(3, 3, 3, False)
 
 
 @pytest.mark.parametrize(

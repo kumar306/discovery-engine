@@ -21,7 +21,13 @@ from libs.observability.metrics import IngestMetrics
 from libs.resilience.bulkhead import Bulkhead, Overloaded
 from libs.schemas import UpsertRequest
 from libs.schemas.documents import MAX_VERSION, DocId
-from services.ingest.api_models import AcceptedBody, ErrorBody, ValidationFailedBody
+from services.ingest.api_models import (
+    AcceptedBody,
+    DocumentStatusBody,
+    ErrorBody,
+    ValidationFailedBody,
+)
+from services.ingest.repository import DocumentStatus
 from services.ingest.service import WriteAccepted, WriteRefused
 from services.ingest.settings import IngestSettings
 from services.ingest.storage import StorageUnavailable
@@ -102,6 +108,28 @@ _DELETE_RESPONSES: dict[int | str, dict[str, Any]] = {
 }
 
 
+# like the delete route, this one reads its path parameter itself so a wrong id is answered in our
+# own error format, so fastapi cannot describe it and it is described here
+# the route has its own path, /status, because two routes with different methods on one path make
+# starlette list only the first route's method in the Allow header of a 405
+_STATUS_PARAMETERS = {
+    "parameters": [
+        {"name": "doc_id", "in": "path", "required": True, "schema": _DOC_ID.json_schema()},
+    ]
+}
+
+_STATUS_RESPONSES: dict[int | str, dict[str, Any]] = {
+    200: {"model": DocumentStatusBody, "description": "How far this document has got."},
+    404: {"model": ErrorBody, "description": "No version of this document was ever accepted."},
+    422: {"model": ValidationFailedBody, "description": "The id is wrong."},
+    503: {
+        "model": ErrorBody,
+        "description": "Overloaded or a dependency is down.",
+        "headers": _RETRY_AFTER,
+    },
+}
+
+
 def _route_label(request: Request) -> str:
     # the route template, not the path, a path with a document id in it would make a new series
     # for every document, and a path that matched no route is one label for all of them
@@ -141,6 +169,8 @@ class IngestPort(Protocol):
     async def delete(
         self, doc_id: str, version: int, request_id: str
     ) -> WriteAccepted | WriteRefused: ...
+
+    async def status(self, doc_id: str) -> DocumentStatus | None: ...
 
 
 class ApiError(Exception):
@@ -398,5 +428,35 @@ def create_app(
         )
         request.state.doc_id, request.state.version = doc_id, number
         return answer(request, await service.delete(doc_id, number, request.state.request_id))
+
+    @app.get(
+        "/v1/documents/{doc_id}/status",
+        responses=_STATUS_RESPONSES,
+        openapi_extra=_STATUS_PARAMETERS,
+    )
+    async def status(request: Request) -> JSONResponse:
+        doc_id = request.path_params["doc_id"]
+        try:
+            _DOC_ID.validate_python(doc_id)
+        except ValidationError as error:
+            raise _validation_failed(_field_errors(error, "doc_id")) from error
+        request.state.doc_id = doc_id
+        found = await service.status(doc_id)
+        if found is None:
+            # 404 means no version of this document was ever accepted, a client that has just
+            # sent a 202 for it can poll again, the row is written in the same transaction
+            raise ApiError(404, "not_found", "no version of this document was ever accepted")
+        request.state.outcome = "found"
+        return JSONResponse(
+            status_code=200,
+            content={
+                "request_id": request.state.request_id,
+                "doc_id": doc_id,
+                "latest_version": found.latest_version,
+                "current_version": found.current_version,
+                "indexed_version": found.indexed_version,
+                "deleted": found.deleted,
+            },
+        )
 
     return app

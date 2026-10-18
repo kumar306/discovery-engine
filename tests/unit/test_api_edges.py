@@ -22,6 +22,7 @@ from libs.observability.logging import JsonFormatter
 from libs.resilience.bulkhead import Overloaded
 from libs.schemas import UpsertRequest
 from services.ingest.app import create_app
+from services.ingest.repository import DocumentStatus
 from services.ingest.service import WriteAccepted, WriteRefused
 from services.ingest.settings import IngestSettings
 from services.ingest.storage import StorageUnavailable
@@ -39,6 +40,8 @@ class RecordingIngest:
         self.release.set()
         self.calls: list[tuple[UpsertRequest, str]] = []
         self.deletes: list[tuple[str, int, str]] = []
+        self.statuses: dict[str, DocumentStatus] = {}
+        self.status_lookups: list[str] = []
 
     async def _answer(self) -> WriteAccepted | WriteRefused:
         self.entered.set()
@@ -56,6 +59,14 @@ class RecordingIngest:
     ) -> WriteAccepted | WriteRefused:
         self.deletes.append((doc_id, version, request_id))
         return await self._answer()
+
+    async def status(self, doc_id: str) -> DocumentStatus | None:
+        self.status_lookups.append(doc_id)
+        self.entered.set()
+        await self.release.wait()
+        if self.error is not None:
+            raise self.error
+        return self.statuses.get(doc_id)
 
 
 def product(**overrides: Any) -> dict[str, Any]:
@@ -375,6 +386,64 @@ async def test_a_refused_delete_is_a_409_like_a_refused_write() -> None:
     assert (response.json()["error"], response.json()["current_version"]) == ("stale_version", 9)
 
 
+# STATUS
+
+
+async def get_status(client: httpx.AsyncClient, doc_id: str = "D1") -> httpx.Response:
+    return await client.get(f"/v1/documents/{doc_id}/status")
+
+
+async def test_a_known_document_gets_its_three_versions(
+    client: httpx.AsyncClient, service: RecordingIngest
+) -> None:
+    service.statuses["D1"] = DocumentStatus(
+        latest_version=5, current_version=4, indexed_version=3, deleted=False
+    )
+    response = await get_status(client)
+    assert response.status_code == 200
+    assert response.json() == {
+        "request_id": response.headers["x-request-id"],
+        "doc_id": "D1",
+        "latest_version": 5,
+        "current_version": 4,
+        "indexed_version": 3,
+        "deleted": False,
+    }
+    assert service.status_lookups == ["D1"]
+
+
+async def test_versions_the_worker_has_not_reached_are_null(
+    client: httpx.AsyncClient, service: RecordingIngest
+) -> None:
+    service.statuses["D1"] = DocumentStatus(5, None, None, False)
+    body = (await get_status(client)).json()
+    assert (body["current_version"], body["indexed_version"]) == (None, None)
+
+
+async def test_an_unknown_document_is_a_404_in_our_error_format(
+    client: httpx.AsyncClient, service: RecordingIngest
+) -> None:
+    response = await get_status(client, "NOPE")
+    assert response.status_code == 404
+    body = response.json()
+    assert (body["error"], body["request_id"]) == ("not_found", response.headers["x-request-id"])
+    assert service.status_lookups == ["NOPE"]
+
+
+@pytest.mark.parametrize(
+    "doc_id",
+    [pytest.param("a" * 65, id="too long"), pytest.param("has space", id="with a space")],
+)
+async def test_a_status_request_with_a_bad_id_is_a_422_and_never_reaches_the_service(
+    client: httpx.AsyncClient, service: RecordingIngest, doc_id: str
+) -> None:
+    response = await get_status(client, doc_id)
+    assert response.status_code == 422
+    assert response.json()["error"] == "validation_failed"
+    assert {item["field"] for item in response.json()["errors"]} == {"doc_id"}
+    assert service.status_lookups == []
+
+
 # the 503 answers: every way a dependency can say no
 
 UNAVAILABLE = [
@@ -396,16 +465,19 @@ UNAVAILABLE = [
 
 
 @pytest.mark.parametrize(("error", "outcome", "code"), UNAVAILABLE)
-@pytest.mark.parametrize("route", ["post", "delete"])
+@pytest.mark.parametrize("route", ["post", "delete", "status"])
 async def test_a_failing_dependency_is_a_503_with_retry_after_and_the_request_id(
     logs: LogCapture, error: Exception, outcome: str, code: str, route: str
 ) -> None:
     service = RecordingIngest()
     service.error = error
     async with await make_client(service, retry_after_s=7) as client:
-        response = (
-            await post(client, product()) if route == "post" else await delete(client, "D1", "3")
-        )
+        if route == "post":
+            response = await post(client, product())
+        elif route == "delete":
+            response = await delete(client, "D1", "3")
+        else:
+            response = await get_status(client)
     assert response.status_code == 503
     assert response.headers["retry-after"] == "7"
     body = response.json()
