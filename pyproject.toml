@@ -45,12 +45,15 @@ dev = [
     "types-redis",
     "pandas-stubs",
     "boto3-stubs[s3]>=1.43.111",
+    # the reference library we trust to prove our own ranking metrics (eval/metrics.py) are correct:
+    # tests/property/test_eval_metrics_vs_ir_measures.py compares our nDCG, recall and MRR with its
+    # answers on random input, so it is a test dependency and lives here, not in the eval group
+    "ir-measures>=0.3",
 ]
 loadtest = [
     "locust>=2.31",
 ]
 eval = [
-    "ir-measures>=0.3",      # independent nDCG/MRR implementation to cross-check our own metrics
     "datasets>=2.20",
 ]
 

@@ -1,0 +1,178 @@
+import math
+from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass
+
+# how we score a search system
+# a shopper types a search, our system returns a list of products, best first
+# human judges have already labelled products for that same search, so we can check our list
+# against them
+# every function in this file scores ONE search (one query), evaluate() at the bottom runs that for
+# every query and takes the average
+
+# the judges gave each product one of four letters for a search
+#   E exact: the product is what the shopper asked for, a wireless mouse for "wireless mouse"
+#   S substitute: it does the job but is not what was asked, a wired mouse
+#   C complement: it goes with what was asked, a mouse pad
+#   I irrelevant: it has nothing to do with the search, a keyboard
+# a gain is a number for how much it is worth to show that kind of product, we pick the numbers
+# exact is worth 1.0, a substitute 0.1, a complement 0.01, irrelevant nothing
+# these are the standard values of the ESCI task, so our scores can be compared with published ones
+GAINS: dict[str, float] = {"E": 1.0, "S": 0.1, "C": 0.01, "I": 0.0}
+
+# recall and mrr cannot use gains, they only ask "is this product relevant, yes or no"
+# so we have to decide which letters count as yes, we count only exact (E) as relevant
+RELEVANT_LABELS: frozenset[str] = frozenset({"E"})
+
+# the shape of the data, with a small example of each, and what it means
+#
+# Judgements is what the judges said, for many queries: query id -> (product id -> letter)
+#   {"q1": {"p1": "E", "p2": "S", "p3": "I"},
+#    "q2": {"p9": "E"}}
+# meaning: for the search q1 the judges said p1 is exact, p2 is a substitute and p3 is irrelevant
+# a product that is missing from the inner dict was never judged for that search
+# the functions below get ONE inner dict, called judged, so judged is a Mapping[str, str]:
+#   {"p1": "E", "p2": "S", "p3": "I"}   product id -> letter, for a single query
+Judgements = Mapping[str, Mapping[str, str]]
+
+# Run is what our system returned, for many queries: query id -> product ids, best first
+#   {"q1": ["p2", "p1", "p7"],
+#    "q2": []}
+# meaning: for q1 our system put p2 on top, then p1, then p7, and for q2 it found nothing
+# the functions below get ONE list, called ranked, for example ["p2", "p1", "p7"]
+Run = Mapping[str, Sequence[str]]
+
+
+@dataclass(frozen=True)
+class QueryScores:
+    ndcg_at_10: float
+    recall_at_100: float
+    mrr_at_10: float
+
+
+@dataclass(frozen=True)
+class Scores:
+    """The mean over every judged query, and how many queries that was."""
+
+    ndcg_at_10: float
+    recall_at_100: float
+    mrr_at_10: float
+    queries: int
+
+
+def _check(ranked: Sequence[str], judged: Mapping[str, str], k: int) -> None:
+    if k < 1:
+        raise ValueError(f"the cutoff must be at least 1, not {k}")
+    if len(set(ranked)) != len(ranked):
+        # a product listed twice would be counted twice, and the score would look better than it is
+        raise ValueError("a product appears twice in one ranking")
+    for label in judged.values():
+        if label not in GAINS:
+            raise ValueError(f"unknown label {label!r}, expected one of {sorted(GAINS)}")
+
+
+def _discounted_sum(gains: Sequence[float]) -> float:
+    # gains are the values of the results in the order they were shown, rank 1 first
+    # each result counts its gain divided by log2(rank + 1), so the lower it sits the less it counts
+    #   rank 1: gain / 1.00     rank 2: gain / 1.58     rank 3: gain / 2.00     rank 4: gain / 2.32
+    # a shopper looks at the first results and rarely scrolls, so an exact product at rank 1 is
+    # worth more than the same product at rank 8
+    return sum(gain / math.log2(rank + 1) for rank, gain in enumerate(gains, start=1))
+
+
+def ndcg_at_k(ranked: Sequence[str], judged: Mapping[str, str], k: int = 10) -> float:
+    """How close our order is to the best possible order, from 0 to 1. 1.0 is the best."""
+    _check(ranked, judged, k)
+    # the formula:   ndcg = got / best
+    #   got  = the discounted sum of the gains of OUR first k results, in OUR order
+    #          what we achieved
+    #   best = the discounted sum of the gains of the PERFECT order the judges' letters allow
+    #          the most anyone could have achieved on this search
+    # so ndcg is 1.0 when our order is perfect, and gets smaller the further we are from it
+    #
+    # worked example: judged {"a": "E", "b": "S"} and we return ["b", "a"]
+    #   got  = 0.1 / 1.00 + 1.0 / 1.58 = 0.731     (substitute first, exact second)
+    #   best = 1.0 / 1.00 + 0.1 / 1.58 = 1.063     (exact first, substitute second)
+    #   ndcg = 0.731 / 1.063 = 0.69     not perfect, the substitute was put above the exact one
+    #
+    # got: look up the gain of each of our first k products, a product the judges never
+    # labelled gets 0, we have no evidence that it is good
+    got = _discounted_sum([GAINS[judged[p]] if p in judged else 0.0 for p in ranked[:k]])
+    # best: take the gain of every product the judges labelled, for example [1.0, 0.1, 0.0] for
+    # one exact, one substitute and one irrelevant, then sort them biggest first
+    # so the 1.0 gains (the exact products) come first, then 0.1, then 0.01, then 0.0
+    # 1.0 at the top of that list means the best product is shown first, that list is the perfect
+    # ranking, and keeping only the first k matches what we did for got
+    best = _discounted_sum(sorted((GAINS[label] for label in judged.values()), reverse=True)[:k])
+    # a search with no product worth anything has best = 0, we score it 0 and do not divide by zero
+    return got / best if best > 0 else 0.0
+
+
+def recall_at_k(
+    ranked: Sequence[str],
+    judged: Mapping[str, str],
+    k: int = 100,
+    relevant: Collection[str] = RELEVANT_LABELS,
+) -> float:
+    """The share of the relevant products that appear in our first k results."""
+    _check(ranked, judged, k)
+    # the logic, for this one query:
+    #   1. wanted = every product the judges marked relevant (exact), these are the ones to find
+    #   2. found  = how many of them are inside our first k results
+    #   3. recall = found / wanted
+    # example: 2 exact products exist, one of them is in our first 100, recall = 1 / 2 = 0.5
+    # 1.0 means we found all of them, 0.0 means we found none
+    # only about forty products per query are judged, so this is biased low: a good product
+    # nobody judged is not counted as found
+    wanted = {product for product, label in judged.items() if label in relevant}
+    # nothing to find for this search, so there is nothing to score
+    if not wanted:
+        return 0.0
+    return len(wanted.intersection(ranked[:k])) / len(wanted)
+
+
+def mrr_at_k(
+    ranked: Sequence[str],
+    judged: Mapping[str, str],
+    k: int = 10,
+    relevant: Collection[str] = RELEVANT_LABELS,
+) -> float:
+    """One over the position of the first relevant product, or 0 if none is in the first k."""
+    _check(ranked, judged, k)
+    # the logic, for this one query:
+    #   walk down our list from the top, find the first product the judges marked relevant
+    #   and score 1 / its position (rank 1 is the top)
+    # first exact product at position 1 gives 1.0, at position 4 gives 0.25, at 10 gives 0.1
+    # none within the first k gives 0.0
+    # it answers "how soon does the shopper meet a right answer", 1.0 is the best
+    for rank, product in enumerate(ranked[:k], start=1):
+        if judged.get(product) in relevant:
+            return 1.0 / rank
+    return 0.0
+
+
+def score_query(ranked: Sequence[str], judged: Mapping[str, str]) -> QueryScores:
+    return QueryScores(
+        ndcg_at_10=ndcg_at_k(ranked, judged, 10),
+        recall_at_100=recall_at_k(ranked, judged, 100),
+        mrr_at_10=mrr_at_k(ranked, judged, 10),
+    )
+
+
+def evaluate(run: Run, judgements: Judgements) -> Scores:
+    """The mean score over every query that has judgements."""
+    if not judgements:
+        raise ValueError("no judged queries, there is nothing to average")
+    # one score per judged query, then the average of each measure
+    # a judged query the system returned nothing for gets run.get(query, []), an empty list, which
+    # scores 0, it is not left out, otherwise a system that answers only the easy queries would
+    # look better, for example two judged queries where we answer one perfectly and nothing for
+    # the other must give 0.5 and not 1.0
+    # a query in the run that nobody judged is ignored, there is nothing to compare it with
+    per_query = [score_query(run.get(query, []), judged) for query, judged in judgements.items()]
+    count = len(per_query)
+    return Scores(
+        ndcg_at_10=sum(q.ndcg_at_10 for q in per_query) / count,
+        recall_at_100=sum(q.recall_at_100 for q in per_query) / count,
+        mrr_at_10=sum(q.mrr_at_10 for q in per_query) / count,
+        queries=count,
+    )

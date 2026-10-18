@@ -2037,6 +2037,7 @@ dependencies = [
 dev = [
     { name = "boto3-stubs", extra = ["s3"] },
     { name = "hypothesis" },
+    { name = "ir-measures" },
     { name = "mypy" },
     { name = "pandas-stubs" },
     { name = "pytest" },
@@ -2049,7 +2050,6 @@ dev = [
 ]
 eval = [
     { name = "datasets" },
-    { name = "ir-measures" },
 ]
 loadtest = [
     { name = "locust" },
@@ -2086,6 +2086,7 @@ requires-dist = [
 dev = [
     { name = "boto3-stubs", extras = ["s3"], specifier = ">=1.43.111" },
     { name = "hypothesis", specifier = ">=6.110" },
+    { name = "ir-measures", specifier = ">=0.3" },
     { name = "mypy", specifier = ">=1.11" },
     { name = "pandas-stubs" },
     { name = "pytest", specifier = ">=8.3" },
@@ -2096,10 +2097,7 @@ dev = [
     { name = "testcontainers", specifier = ">=4.8" },
     { name = "types-redis" },
 ]
-eval = [
-    { name = "datasets", specifier = ">=2.20" },
-    { name = "ir-measures", specifier = ">=0.3" },
-]
+eval = [{ name = "datasets", specifier = ">=2.20" }]
 loadtest = [{ name = "locust", specifier = ">=2.31" }]
 ml = [
     { name = "fastembed", specifier = ">=0.4" },
