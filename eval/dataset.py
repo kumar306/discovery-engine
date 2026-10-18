@@ -1,6 +1,6 @@
 import hashlib
 import json
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -230,8 +230,10 @@ def select(pairs: Iterable[Pair], config: SelectionConfig) -> Selection:
     )
 
 
-def build_mini(selection: Selection, config: SelectionConfig) -> Selection:
-    """A small set for fast tests: test queries, their labelled products, and distractors."""
+def choose_mini(
+    selection: Selection, config: SelectionConfig
+) -> tuple[tuple[QueryRow, ...], tuple[JudgementRow, ...]]:
+    """The queries of the mini set, and every judgement of those queries."""
     test_queries = [q for q in selection.queries if q.split == "test"]
     if len(test_queries) < config.mini_queries:
         raise ValueError(
@@ -243,11 +245,26 @@ def build_mini(selection: Selection, config: SelectionConfig) -> Selection:
     chosen_ids = {q.query_id for q in chosen}
     # all the judgements of the chosen queries, the selection is already sorted
     judgements = tuple(j for j in selection.judgements if j.query_id in chosen_ids)
-    judged = {j.product_id for j in judgements}
-    if len(judged) > config.mini_products:
+    return tuple(chosen), judgements
+
+
+def build_mini(
+    selection: Selection,
+    config: SelectionConfig,
+    product_ids_in_planned_blocks: Collection[str] | None = None,
+) -> Selection:
+    """A small set for fast tests: test queries, their labelled products, and distractors.
+
+    product_ids_in_planned_blocks, when given, limits the distractors to those products. The
+    download script gives the products whose text it will read anyway, so the mini set
+    needs few row groups.
+    """
+    chosen, judgements = choose_mini(selection, config)
+    mini_query_product_ids = {j.product_id for j in judgements}
+    if len(mini_query_product_ids) > config.mini_products:
         raise ValueError(
-            f"mini_products {config.mini_products} is smaller than the {len(judged)} products "
-            f"judged for the mini queries"
+            f"mini_products {config.mini_products} is smaller than the "
+            f"{len(mini_query_product_ids)} products judged for the mini queries"
         )
     # distractors: products of the selection that the judges did NOT label for these queries
     #
@@ -262,15 +279,27 @@ def build_mini(selection: Selection, config: SelectionConfig) -> Selection:
     # the distractors play that role: they compete for the top places, so a search that cannot
     # tell good from bad scores low here, the way it would in production
     # the more realistic the competition, the more we can trust the score
-    candidates = sorted(
-        (p for p in selection.product_ids if p not in judged),
+    planned_block_product_ids = (
+        None if product_ids_in_planned_blocks is None else set(product_ids_in_planned_blocks)
+    )
+    distractor_candidates_ranked = sorted(
+        (
+            p
+            for p in selection.product_ids
+            if p not in mini_query_product_ids
+            and (planned_block_product_ids is None or p in planned_block_product_ids)
+        ),
         key=lambda p: stable_rank(config.seed, "distractor", p),
     )
-    needed = config.mini_products - len(judged)
-    if needed > len(candidates):
-        raise ValueError(f"only {len(candidates)} products are left to use as distractors")
-    product_ids = tuple(sorted(judged.union(candidates[:needed])))
-    return Selection(tuple(chosen), judgements, product_ids)
+    distractors_needed = config.mini_products - len(mini_query_product_ids)
+    if distractors_needed > len(distractor_candidates_ranked):
+        raise ValueError(
+            f"only {len(distractor_candidates_ranked)} products are left to use as distractors"
+        )
+    product_ids = tuple(
+        sorted(mini_query_product_ids.union(distractor_candidates_ranked[:distractors_needed]))
+    )
+    return Selection(chosen, judgements, product_ids)
 
 
 def collect_products(
@@ -304,6 +333,7 @@ def write_dataset(
     products: Iterable[Product],
     config: SelectionConfig,
     dataset_revision: int,
+    sources: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Write queries, judgements and products as text files, and a manifest that describes them.
 
@@ -323,6 +353,8 @@ def write_dataset(
         "dataset": {"repo": DATASET_REPO, "revision": DATASET_REVISION},
         "dataset_revision": dataset_revision,
         "config": asdict(config),
+        # the files of the dataset this was built from, with the checksums huggingface gives them
+        "source_files": [dict(source) for source in sources],
         "counts": {
             "queries": len(selection.queries),
             "train": sum(q.split == "train" for q in selection.queries),

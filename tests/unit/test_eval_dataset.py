@@ -20,6 +20,7 @@ from eval.dataset import (
     Selection,
     SelectionConfig,
     build_mini,
+    choose_mini,
     collect_products,
     restrict,
     select,
@@ -344,3 +345,41 @@ def test_the_products_file_is_the_same_whatever_order_the_products_arrive_in(
     write_dataset(first, selection, in_order, CONFIG, dataset_revision=1)
     write_dataset(second, selection, list(reversed(in_order)), CONFIG, dataset_revision=1)
     assert (first / "products.jsonl").read_bytes() == (second / "products.jsonl").read_bytes()
+
+
+# the mini set can be told which products it may use as distractors
+
+
+def test_the_choice_of_mini_queries_is_the_same_one_build_mini_uses(
+    selection: Selection, mini: Selection
+) -> None:
+    queries, judgements = choose_mini(selection, CONFIG)
+    assert queries == mini.queries
+    assert judgements == mini.judgements
+
+
+def test_distractors_come_only_from_the_pool_when_a_pool_is_given(selection: Selection) -> None:
+    _, judgements = choose_mini(selection, CONFIG)
+    judged = {j.product_id for j in judgements}
+    others = [p for p in selection.product_ids if p not in judged]
+    pool = set(others[:15])  # enough for the 25 - judged distractors we need
+    needed = CONFIG.mini_products - len(judged)
+    small = replace(CONFIG, mini_products=len(judged) + min(needed, len(pool)))
+    mini = build_mini(selection, small, product_ids_in_planned_blocks=pool)
+    assert set(mini.product_ids) - judged <= pool
+
+
+def test_a_pool_too_small_for_the_distractors_is_an_error(selection: Selection) -> None:
+    with pytest.raises(ValueError, match="distractors"):
+        build_mini(selection, CONFIG, product_ids_in_planned_blocks=set())
+
+
+def test_the_manifest_records_the_source_files_it_was_built_from(
+    tmp_path: Path, selection: Selection
+) -> None:
+    sources = [{"name": "data/test-0.parquet", "split": "test", "size": 10, "sha256": "a" * 64}]
+    products = [product(pid) for pid in selection.product_ids]
+    manifest = write_dataset(
+        tmp_path, selection, products, CONFIG, dataset_revision=1, sources=sources
+    )
+    assert manifest["source_files"] == sources

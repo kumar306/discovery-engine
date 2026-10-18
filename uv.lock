@@ -2056,6 +2056,7 @@ loadtest = [
 ]
 ml = [
     { name = "fastembed" },
+    { name = "huggingface-hub" },
     { name = "lightgbm" },
     { name = "pandas" },
     { name = "pyarrow" },
@@ -2101,6 +2102,7 @@ eval = [{ name = "datasets", specifier = ">=2.20" }]
 loadtest = [{ name = "locust", specifier = ">=2.31" }]
 ml = [
     { name = "fastembed", specifier = ">=0.4" },
+    { name = "huggingface-hub", specifier = ">=1.33" },
     { name = "lightgbm", specifier = ">=4.5" },
     { name = "pandas", specifier = ">=2.2" },
     { name = "pyarrow", specifier = ">=16" },
