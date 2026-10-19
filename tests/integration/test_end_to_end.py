@@ -10,21 +10,26 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from fastembed import SparseTextEmbedding
 from psycopg_pool import AsyncConnectionPool
 from qdrant_client import AsyncQdrantClient, models
 
+from eval.dataset import Product
+from eval.loader import LoadConfig, LoadReport, load_dataset
 from services.embed.embedder import OnnxEmbedder, build_onnx_embedder
 from services.embed.qdrant import ensure_collection
 from services.embed.settings import EmbedSettings
 from services.embed.worker import serve
 from services.ingest.relay import Relay, kafka_publisher
 from services.ingest.settings import IngestSettings
+from tests.unit.test_eval_loader import REVISION, dataset
 
-from .conftest import Api, Database, committed_offsets, document, eventually, read_topic
+from .conftest import Api, Database, committed_offsets, document, eventually, outbox, read_topic
 
 PRODUCTS: dict[str, dict[str, Any]] = {
     "mouse": {
@@ -207,3 +212,45 @@ async def test_products_travel_from_the_api_to_real_searches_and_changes_follow(
     assert await read_topic(dlq_topic, 0) == []
     offsets = await committed_offsets(system.settings.consumer_group)
     assert sum(offsets.values()) == 7
+
+
+class ForcedOverload(httpx.AsyncBaseTransport):
+    """Answers the first posts with 503 and passes everything else to the real api."""
+
+    def __init__(self, inner: httpx.AsyncBaseTransport, refusals: int) -> None:
+        self.inner = inner
+        self.refusals = refusals
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/documents" and self.refusals > 0:
+            self.refusals -= 1
+            return httpx.Response(
+                503, headers={"Retry-After": "0"}, json={"error": "overloaded"}, request=request
+            )
+        return await self.inner.handle_async_request(request)
+
+
+async def test_the_loader_puts_a_dataset_through_the_api_and_a_second_run_changes_nothing(
+    system: System, tmp_path: Path
+) -> None:
+    items = [
+        Product(f"L{n}", "us", f"widget zorkunit{n}", None, None, None, None) for n in range(20)
+    ]
+    dataset(tmp_path, items)
+    # the one private access: the real transport of the api client, to put a forced 503 in front
+    real = system.api.client._transport
+    async with httpx.AsyncClient(
+        transport=ForcedOverload(real, refusals=3), base_url=system.api.client.base_url
+    ) as client:
+        config = LoadConfig(poll_interval_s=0.5, wait_timeout_s=120)
+        report = await load_dataset(client, tmp_path, config)
+        assert report == LoadReport(documents=20, failures={})
+        for item in items:
+            row = document(system.db.direct_dsn, item.product_id)
+            assert row is not None
+            assert row["indexed"] == REVISION
+        # the loader said done, so a search must already find a product by its own word
+        assert await system.sparse_search("zorkunit7") == ["L7"]
+        outbox_rows = len(outbox(system.db.direct_dsn))
+        assert (await load_dataset(client, tmp_path, config)).failures == {}
+        assert len(outbox(system.db.direct_dsn)) == outbox_rows

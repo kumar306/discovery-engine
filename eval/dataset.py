@@ -378,5 +378,8 @@ def verify_dataset(directory: Path) -> None:
         path = directory / name
         if not path.exists():
             raise ManifestMismatch(f"{name} is missing")
-        if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+        # file_digest reads the file in blocks, a big products.jsonl is never held whole
+        with path.open("rb") as handle:
+            actual = hashlib.file_digest(handle, "sha256").hexdigest()
+        if actual != expected:
             raise ManifestMismatch(f"{name} does not match the manifest")

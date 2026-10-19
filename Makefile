@@ -2,7 +2,7 @@
 COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 UV := uv run
 
-.PHONY: help setup up down topics init test test-integration test-crash test-spark lint typecheck eval bench chaos deploy data data-full
+.PHONY: help setup up down topics init test test-integration test-crash test-spark lint typecheck eval bench chaos deploy data data-full load-mini load-full
 
 help:            ## list targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-18s %s\n",$$1,$$2}'
@@ -46,6 +46,12 @@ data:            ## build the small ESCI set in ./data (never committed), reads 
 
 data-full:       ## build the 100 thousand product selection from all files, run at will
 	$(UV) python scripts/download_data.py --size full
+
+load-mini:       ## send the mini set through the running ingest api and wait until every product is indexed
+	$(UV) python scripts/load_data.py --size mini
+
+load-full:       ## the same for the 100 thousand product set, run at will
+	$(UV) python scripts/load_data.py --size full
 
 eval:            ## retrieval ladder + ranking + RAG eval, writes benchmarks/results/
 	$(UV) python -m eval.run --all
