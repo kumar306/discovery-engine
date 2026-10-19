@@ -8,8 +8,8 @@ from collections.abc import Sequence
 import httpx
 import pytest
 
-from services.embed.embedder import Embedding, EmbedTransient, ModelMismatch
-from services.embed.qdrant import CollectionMismatch
+from libs.embedding.collection import CollectionMismatch
+from libs.embedding.model import Embedding, EmbedTransient, ModelMismatch
 from services.embed.settings import EmbedSettings
 from services.embed.worker import serve
 from tests.support.hash_embedder import HashEmbedder

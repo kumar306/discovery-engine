@@ -7,9 +7,24 @@ from typing import Any, Protocol
 
 from fastembed import SparseTextEmbedding, TextEmbedding
 
+from libs.embedding.settings import ModelSettings
 from libs.resilience.retry import PermanentError, TransientError
-from services.embed.compose import Limits, Tokenizer
-from services.embed.settings import EmbedSettings
+
+
+class Tokenizer(Protocol):
+    def spans(self, text: str) -> list[tuple[int, int]]:
+        """Character span (start, end) of every content token; special tokens are not included."""
+        ...
+
+
+@dataclass(frozen=True)
+class Limits:
+    max_tokens: int
+    margin: int = 16
+
+    @property
+    def budget(self) -> int:
+        return self.max_tokens - self.margin
 
 
 class EmbedPermanent(PermanentError):
@@ -173,7 +188,7 @@ class OnnxEmbedder:
         ]
 
 
-def build_onnx_embedder(settings: EmbedSettings) -> OnnxEmbedder:
+def build_onnx_embedder(settings: ModelSettings) -> OnnxEmbedder:
     dense = TextEmbedding(settings.dense_model, threads=settings.embed_threads)
     sparse = SparseTextEmbedding("Qdrant/bm25", avg_len=settings.bm25_avg_len)
     # fastembed types its model as a base class that has no tokenizer, the onnx one has

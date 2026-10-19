@@ -9,11 +9,11 @@ from typing import Any
 import pytest
 from qdrant_client import models
 
+from libs.embedding.model import EmbedTransient
 from libs.resilience.retry import PermanentError
 from libs.schemas import UpsertEvent
 from libs.schemas.hashing import content_sha
 from services.embed.compose import ComposeError
-from services.embed.embedder import EmbedTransient
 from services.embed.pipeline import KafkaEventResult, Pipeline
 from services.ingest.storage import MissingObject, StorageUnavailable
 from tests.support.hash_embedder import HashEmbedder

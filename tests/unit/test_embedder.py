@@ -12,15 +12,9 @@ from typing import Any, ClassVar
 import numpy as np
 import pytest
 
+from libs.embedding import model as embedder_module
+from libs.embedding.model import EmbedPermanent, EmbedTransient, Limits, ModelMismatch, OnnxEmbedder
 from libs.resilience.retry import FailureAction, decide
-from services.embed import embedder as embedder_module
-from services.embed.compose import Limits
-from services.embed.embedder import (
-    EmbedPermanent,
-    EmbedTransient,
-    ModelMismatch,
-    OnnxEmbedder,
-)
 from services.embed.settings import EmbedSettings
 from tests.support.hash_embedder import WhitespaceTokenizer
 

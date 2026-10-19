@@ -21,7 +21,7 @@ from qdrant_client import AsyncQdrantClient, models
 
 from eval.dataset import Product
 from eval.loader import LoadConfig, LoadReport, load_dataset
-from services.embed.embedder import OnnxEmbedder, build_onnx_embedder
+from libs.embedding.model import OnnxEmbedder, build_onnx_embedder
 from services.embed.qdrant import ensure_collection
 from services.embed.settings import EmbedSettings
 from services.embed.worker import serve

@@ -17,6 +17,7 @@ import pytest
 from aiokafka.errors import KafkaError
 from prometheus_client import CollectorRegistry
 
+from libs.embedding.model import EmbedTransient
 from libs.observability.metrics import EmbedMetrics
 from libs.schemas import DocEvent, UpsertEvent
 from services.embed.consumer import (
@@ -27,7 +28,6 @@ from services.embed.consumer import (
     kafka_consumer,
     kafka_dead_letter_sink,
 )
-from services.embed.embedder import EmbedTransient
 from services.embed.pipeline import KafkaEventResult
 from services.embed.settings import EmbedSettings
 from tests.support.crash import SimulatedCrash

@@ -6,13 +6,13 @@ from uuid import UUID
 from prometheus_client import CollectorRegistry
 from pydantic import ValidationError
 
+from libs.embedding.model import Embedder
 from libs.observability.metrics import EmbedMetrics
 from libs.resilience.retry import PermanentError
 from libs.schemas import DocEvent, UpsertEvent, UpsertRequest
 from libs.schemas.hashing import chunk_id, content_sha
 from services.embed.compose import Chunk, compose
 from services.embed.diff import diff_chunks
-from services.embed.embedder import Embedder
 from services.embed.gate import GateState, VersionGateDecision, gate
 from services.embed.qdrant import ChunkPayload, IndexedChunk, LiveChunk
 from services.embed.repository import NewChunk, PgCommitResult, Snapshot

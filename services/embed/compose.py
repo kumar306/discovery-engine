@@ -2,8 +2,8 @@ import re
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
 
+from libs.embedding.model import Limits, Tokenizer
 from libs.resilience.retry import PermanentError
 from libs.schemas import UpsertRequest
 from libs.schemas.hashing import content_sha
@@ -11,24 +11,8 @@ from libs.schemas.hashing import content_sha
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 
 
-class Tokenizer(Protocol):
-    def spans(self, text: str) -> list[tuple[int, int]]:
-        """Character span (start, end) of every content token; special tokens are not included."""
-        ...
-
-
 class ComposeError(PermanentError):
     """The product cannot be turned into chunks; retrying will not help (a permanent error)."""
-
-
-@dataclass(frozen=True)
-class Limits:
-    max_tokens: int
-    margin: int = 16
-
-    @property
-    def budget(self) -> int:
-        return self.max_tokens - self.margin
 
 
 @dataclass(frozen=True)

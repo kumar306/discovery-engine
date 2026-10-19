@@ -8,8 +8,7 @@ import hashlib
 import re
 from collections.abc import Sequence
 
-from services.embed.compose import Limits
-from services.embed.embedder import Embedding
+from libs.embedding.model import Embedding, Limits
 
 _WORD = re.compile(r"\S+")
 

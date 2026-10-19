@@ -13,9 +13,10 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from libs.embedding.model import Limits
 from libs.schemas import UpsertRequest
 from libs.schemas.hashing import content_sha
-from services.embed.compose import Chunk, ComposeError, Limits, compose
+from services.embed.compose import Chunk, ComposeError, compose
 
 
 class WhitespaceTokenizer:

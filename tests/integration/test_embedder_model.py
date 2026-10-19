@@ -11,9 +11,9 @@ from itertools import pairwise
 
 import pytest
 
+from libs.embedding.model import ModelMismatch, OnnxEmbedder, build_onnx_embedder
 from libs.schemas import UpsertRequest
 from services.embed.compose import compose
-from services.embed.embedder import ModelMismatch, OnnxEmbedder, build_onnx_embedder
 from services.embed.settings import EmbedSettings
 
 TIMEOUT = 120.0

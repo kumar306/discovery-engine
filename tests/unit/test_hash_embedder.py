@@ -1,6 +1,6 @@
 """The stub that stands in for the model in the pipeline tests."""
 
-from services.embed.embedder import Embedder
+from libs.embedding.model import Embedder
 from tests.support.hash_embedder import HashEmbedder, WhitespaceTokenizer
 
 

@@ -8,14 +8,13 @@ import pytest
 from qdrant_client import AsyncQdrantClient, models
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
+from libs.embedding.collection import CollectionMismatch, verify_collection
 from services.embed.qdrant import (
     ChunkIndex,
     ChunkPayload,
-    CollectionMismatch,
     IndexedChunk,
     LiveChunk,
     ensure_collection,
-    verify_collection,
 )
 from services.embed.settings import EmbedSettings
 
