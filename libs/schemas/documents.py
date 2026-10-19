@@ -35,6 +35,17 @@ class UpsertRequest(BaseModel):
     locale: Locale
 
 
+# the most document ids one status request may ask about: 2000 ids of the longest allowed size
+# (64 characters, plus two quotes and a comma) are about 134 KB, under the 256 KB body limit
+MAX_STATUS_BATCH = 2000
+
+
+class StatusBatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    doc_ids: list[DocId] = Field(min_length=1, max_length=MAX_STATUS_BATCH)
+
+
 class _EventBase(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 

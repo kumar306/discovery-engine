@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
@@ -82,6 +82,9 @@ class IngestService:
 
     async def status(self, doc_id: str) -> DocumentStatus | None:
         return await self._pg_documents.status(CORPUS, doc_id)
+
+    async def status_batch(self, doc_ids: Sequence[str]) -> dict[str, DocumentStatus]:
+        return await self._pg_documents.status_batch(CORPUS, doc_ids)
 
     # the four answers the precheck can give, shared by upsert and delete so they cannot drift
     # returns None when the write may go on

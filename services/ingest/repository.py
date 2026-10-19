@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -38,6 +39,12 @@ _KNOWN = (
 _STATUS = """
 select latest_version, current_version, indexed_version, deleted
   from documents where corpus = %s and doc_id = %s
+"""
+
+
+_STATUS_BATCH = """
+select doc_id, latest_version, current_version, indexed_version, deleted
+  from documents where corpus = %s and doc_id = any(%s)
 """
 
 
@@ -82,6 +89,11 @@ class DocumentRepository:
         async with self._pg_pool.connection() as conn:
             row = await (await conn.execute(_STATUS, (corpus, doc_id))).fetchone()
         return None if row is None else DocumentStatus(row[0], row[1], row[2], row[3])
+
+    async def status_batch(self, corpus: str, doc_ids: Sequence[str]) -> dict[str, DocumentStatus]:
+        async with self._pg_pool.connection() as conn:
+            rows = await (await conn.execute(_STATUS_BATCH, (corpus, list(doc_ids)))).fetchall()
+        return {row[0]: DocumentStatus(row[1], row[2], row[3], row[4]) for row in rows}
 
     async def accept(
         self,

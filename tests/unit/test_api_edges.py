@@ -8,7 +8,7 @@ import io
 import json
 import logging
 import re
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -20,7 +20,7 @@ from psycopg_pool import PoolTimeout
 
 from libs.observability.logging import JsonFormatter
 from libs.resilience.bulkhead import Overloaded
-from libs.schemas import UpsertRequest
+from libs.schemas import MAX_STATUS_BATCH, UpsertRequest
 from services.ingest.app import create_app
 from services.ingest.repository import DocumentStatus
 from services.ingest.service import WriteAccepted, WriteRefused
@@ -42,6 +42,7 @@ class RecordingIngest:
         self.deletes: list[tuple[str, int, str]] = []
         self.statuses: dict[str, DocumentStatus] = {}
         self.status_lookups: list[str] = []
+        self.status_batches: list[list[str]] = []
 
     async def _answer(self) -> WriteAccepted | WriteRefused:
         self.entered.set()
@@ -67,6 +68,14 @@ class RecordingIngest:
         if self.error is not None:
             raise self.error
         return self.statuses.get(doc_id)
+
+    async def status_batch(self, doc_ids: Sequence[str]) -> dict[str, DocumentStatus]:
+        self.status_batches.append(list(doc_ids))
+        self.entered.set()
+        await self.release.wait()
+        if self.error is not None:
+            raise self.error
+        return {doc_id: self.statuses[doc_id] for doc_id in doc_ids if doc_id in self.statuses}
 
 
 def product(**overrides: Any) -> dict[str, Any]:
@@ -444,6 +453,82 @@ async def test_a_status_request_with_a_bad_id_is_a_422_and_never_reaches_the_ser
     assert service.status_lookups == []
 
 
+# STATUS BATCH
+
+
+async def get_statuses(client: httpx.AsyncClient, doc_ids: Any) -> httpx.Response:
+    return await client.post("/v1/document-statuses", json={"doc_ids": doc_ids})
+
+
+async def test_a_batch_answers_for_the_known_documents_in_the_order_asked(
+    client: httpx.AsyncClient, service: RecordingIngest
+) -> None:
+    service.statuses["D1"] = DocumentStatus(5, 4, 3, False)
+    service.statuses["D3"] = DocumentStatus(2, None, None, False)
+    response = await get_statuses(client, ["D3", "D2", "D1", "D3"])
+    assert response.status_code == 200
+    body = response.json()
+    assert body["request_id"] == response.headers["x-request-id"]
+    # D2 is unknown and left out, D3 was asked twice and comes once
+    assert [item["doc_id"] for item in body["statuses"]] == ["D3", "D1"]
+    assert body["statuses"][1] == {
+        "doc_id": "D1",
+        "latest_version": 5,
+        "current_version": 4,
+        "indexed_version": 3,
+        "deleted": False,
+    }
+    assert service.status_batches == [["D3", "D2", "D1", "D3"]]
+
+
+@pytest.mark.parametrize(
+    ("body", "field"),
+    [
+        pytest.param({"doc_ids": []}, "doc_ids", id="empty list"),
+        pytest.param({"doc_ids": ["D1", "has space"]}, "doc_ids.1", id="a bad id"),
+        pytest.param({"doc_ids": ["D1"], "extra": 1}, "extra", id="an unknown field"),
+        pytest.param({}, "doc_ids", id="no list"),
+        pytest.param({"doc_ids": "D1"}, "doc_ids", id="not a list"),
+    ],
+)
+async def test_a_bad_batch_gets_a_422_and_never_reaches_the_service(
+    client: httpx.AsyncClient, service: RecordingIngest, body: dict[str, Any], field: str
+) -> None:
+    response = await client.post("/v1/document-statuses", json=body)
+    assert response.status_code == 422
+    assert response.json()["error"] == "validation_failed"
+    assert field in {item["field"] for item in response.json()["errors"]}
+    assert service.status_batches == []
+
+
+async def test_more_ids_than_the_limit_get_a_422(service: RecordingIngest) -> None:
+    ids = [f"D{n}" for n in range(MAX_STATUS_BATCH + 1)]
+    app = create_app(service, IngestSettings(max_body_bytes=500_000))
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://api") as client:
+        response = await get_statuses(client, ids)
+    assert response.status_code == 422
+    assert {item["field"] for item in response.json()["errors"]} == {"doc_ids"}
+    assert service.status_batches == []
+
+
+async def test_a_batch_that_is_not_json_is_a_422_invalid_json(
+    client: httpx.AsyncClient, service: RecordingIngest
+) -> None:
+    response = await client.post("/v1/document-statuses", content=b"{not json")
+    assert response.status_code == 422
+    assert response.json()["error"] == "invalid_json"
+    assert service.status_batches == []
+
+
+async def test_a_batch_body_over_the_size_limit_is_a_413(
+    client: httpx.AsyncClient, service: RecordingIngest
+) -> None:
+    response = await get_statuses(client, [f"D{n}" for n in range(LIMIT)])
+    assert response.status_code == 413
+    assert service.status_batches == []
+
+
 # the 503 answers: every way a dependency can say no
 
 UNAVAILABLE = [
@@ -465,7 +550,7 @@ UNAVAILABLE = [
 
 
 @pytest.mark.parametrize(("error", "outcome", "code"), UNAVAILABLE)
-@pytest.mark.parametrize("route", ["post", "delete", "status"])
+@pytest.mark.parametrize("route", ["post", "delete", "status", "statuses"])
 async def test_a_failing_dependency_is_a_503_with_retry_after_and_the_request_id(
     logs: LogCapture, error: Exception, outcome: str, code: str, route: str
 ) -> None:
@@ -476,8 +561,10 @@ async def test_a_failing_dependency_is_a_503_with_retry_after_and_the_request_id
             response = await post(client, product())
         elif route == "delete":
             response = await delete(client, "D1", "3")
-        else:
+        elif route == "status":
             response = await get_status(client)
+        else:
+            response = await get_statuses(client, ["D1"])
     assert response.status_code == 503
     assert response.headers["retry-after"] == "7"
     body = response.json()

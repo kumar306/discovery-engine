@@ -2,7 +2,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, nullcontext
 from typing import Any, Protocol
 
@@ -19,10 +19,11 @@ from libs.observability.health import Probe, add_health_routes
 from libs.observability.logging import request_id_var
 from libs.observability.metrics import IngestMetrics
 from libs.resilience.bulkhead import Bulkhead, Overloaded
-from libs.schemas import UpsertRequest
+from libs.schemas import StatusBatchRequest, UpsertRequest
 from libs.schemas.documents import MAX_VERSION, DocId
 from services.ingest.api_models import (
     AcceptedBody,
+    DocumentStatusBatchBody,
     DocumentStatusBody,
     ErrorBody,
     ValidationFailedBody,
@@ -130,6 +131,27 @@ _STATUS_RESPONSES: dict[int | str, dict[str, Any]] = {
 }
 
 
+_STATUS_BATCH_BODY = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "application/json": {"schema": {"$ref": "#/components/schemas/StatusBatchRequest"}}
+        },
+    }
+}
+
+_STATUS_BATCH_RESPONSES: dict[int | str, dict[str, Any]] = {
+    200: {"model": DocumentStatusBatchBody, "description": "The known documents of the batch."},
+    413: {"model": ErrorBody, "description": "The body is bigger than the limit."},
+    422: {"model": ValidationFailedBody, "description": "The list or an id is wrong."},
+    503: {
+        "model": ErrorBody,
+        "description": "Overloaded or a dependency is down.",
+        "headers": _RETRY_AFTER,
+    },
+}
+
+
 def _route_label(request: Request) -> str:
     # the route template, not the path, a path with a document id in it would make a new series
     # for every document, and a path that matched no route is one label for all of them
@@ -145,17 +167,18 @@ def _route_label(request: Request) -> str:
     return "other"
 
 
-def _document_the_request_body(app: FastAPI) -> None:
-    """Put the UpsertRequest model into the openapi document that the upsert route points at."""
+def _document_the_request_bodies(app: FastAPI) -> None:
+    """Put the request models of the routes that read their own body into the openapi document."""
     original = app.openapi
 
     def openapi() -> dict[str, Any]:
         schema = original()
         schemas = schema.setdefault("components", {}).setdefault("schemas", {})
-        if "UpsertRequest" not in schemas:
-            model = UpsertRequest.model_json_schema(ref_template="#/components/schemas/{model}")
-            schemas.update(model.pop("$defs", {}))
-            schemas["UpsertRequest"] = model
+        for model in (UpsertRequest, StatusBatchRequest):
+            if model.__name__ not in schemas:
+                model_schema = model.model_json_schema(ref_template="#/components/schemas/{model}")
+                schemas.update(model_schema.pop("$defs", {}))
+                schemas[model.__name__] = model_schema
         return schema
 
     app.openapi = openapi  # type: ignore[method-assign]
@@ -171,6 +194,8 @@ class IngestPort(Protocol):
     ) -> WriteAccepted | WriteRefused: ...
 
     async def status(self, doc_id: str) -> DocumentStatus | None: ...
+
+    async def status_batch(self, doc_ids: Sequence[str]) -> dict[str, DocumentStatus]: ...
 
 
 class ApiError(Exception):
@@ -234,6 +259,18 @@ def _parse_upsert(body: bytes) -> UpsertRequest:
         raise _validation_failed(errors) from error
 
 
+def _parse_status_batch(body: bytes) -> StatusBatchRequest:
+    try:
+        return StatusBatchRequest.model_validate_json(body)
+    except ValidationError as error:
+        errors = _field_errors(error)
+        if any(item["type"] == "json_invalid" for item in errors):
+            raise ApiError(
+                422, "invalid_json", "the body is not valid json", errors=errors
+            ) from error
+        raise _validation_failed(errors) from error
+
+
 def _parse_delete(doc_id: str, version: str | None) -> tuple[str, int]:
     errors: list[dict[str, str]] = []
     try:
@@ -276,7 +313,7 @@ def create_app(
         readiness_cache_s=settings.readiness_cache_s,
         probe_timeout_s=settings.probe_timeout_s,
     )
-    _document_the_request_body(app)
+    _document_the_request_bodies(app)
     # the outermost limit, requests being served at once, separate from the s3 and database limits
     admission = admission or Bulkhead(settings.max_inflight_requests, settings.admission_wait_s)
 
@@ -456,6 +493,34 @@ def create_app(
                 "current_version": found.current_version,
                 "indexed_version": found.indexed_version,
                 "deleted": found.deleted,
+            },
+        )
+
+    @app.post(
+        "/v1/document-statuses",
+        responses=_STATUS_BATCH_RESPONSES,
+        openapi_extra=_STATUS_BATCH_BODY,
+    )
+    async def status_batch(request: Request) -> JSONResponse:
+        batch = _parse_status_batch(await _read_body(request, settings.max_body_bytes))
+        found = await service.status_batch(batch.doc_ids)
+        request.state.outcome = "found"
+        # in the order asked, a repeated id once, an unknown id not at all
+        return JSONResponse(
+            status_code=200,
+            content={
+                "request_id": request.state.request_id,
+                "statuses": [
+                    {
+                        "doc_id": doc_id,
+                        "latest_version": found[doc_id].latest_version,
+                        "current_version": found[doc_id].current_version,
+                        "indexed_version": found[doc_id].indexed_version,
+                        "deleted": found[doc_id].deleted,
+                    }
+                    for doc_id in dict.fromkeys(batch.doc_ids)
+                    if doc_id in found
+                ],
             },
         )
 

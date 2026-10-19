@@ -81,6 +81,21 @@ async def test_the_status_follows_a_document_through_the_worker_stages(
     assert await repo.status("esci", "D1") == DocumentStatus(3, 3, 3, False)
 
 
+async def test_the_status_of_many_documents_comes_back_in_one_query(
+    pool: AsyncConnectionPool,
+) -> None:
+    repo = DocumentRepository(pool)
+    await accept(pool, "D1", 3)
+    await accept(pool, "D2", 1)
+    found = await repo.status_batch("esci", ["D1", "D2", "NOPE"])
+    # the unknown id has no row and is left out
+    assert found == {
+        "D1": DocumentStatus(3, None, None, False),
+        "D2": DocumentStatus(1, None, None, False),
+    }
+    assert await repo.status_batch("esci", []) == {}
+
+
 @pytest.mark.parametrize(
     ("existing", "incoming", "outcome", "latest"),
     [

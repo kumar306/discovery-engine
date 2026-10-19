@@ -14,8 +14,7 @@ class AcceptedBody(BaseModel):
     accepted_at: datetime
 
 
-class DocumentStatusBody(BaseModel):
-    request_id: str
+class DocumentStatusItem(BaseModel):
     doc_id: str
     # newest version the api accepted
     latest_version: int
@@ -25,6 +24,16 @@ class DocumentStatusBody(BaseModel):
     indexed_version: int | None
     # true when the newest version the worker committed is a delete
     deleted: bool
+
+
+class DocumentStatusBody(DocumentStatusItem):
+    request_id: str
+
+
+class DocumentStatusBatchBody(BaseModel):
+    request_id: str
+    # one entry per known document, in the order asked, unknown ids are left out
+    statuses: list[DocumentStatusItem]
 
 
 class ErrorBody(BaseModel):
