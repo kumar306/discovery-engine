@@ -9,6 +9,7 @@ state is live, so what they find is exactly what a searcher would see.
 import asyncio
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,12 +22,16 @@ from qdrant_client import AsyncQdrantClient, models
 
 from eval.dataset import Product
 from eval.loader import LoadConfig, LoadReport, load_dataset
+from libs.embedding.collection import CollectionMismatch, verify_collection
 from libs.embedding.model import OnnxEmbedder, build_onnx_embedder
 from services.embed.qdrant import ensure_collection
 from services.embed.settings import EmbedSettings
 from services.embed.worker import serve
 from services.ingest.relay import Relay, kafka_publisher
 from services.ingest.settings import IngestSettings
+from services.query.encoder import OnnxQueryEncoder
+from services.query.main import build as build_query_service
+from services.query.settings import QuerySettings
 from tests.unit.test_eval_loader import REVISION, dataset
 
 from .conftest import Api, Database, committed_offsets, document, eventually, outbox, read_topic
@@ -254,3 +259,132 @@ async def test_the_loader_puts_a_dataset_through_the_api_and_a_second_run_change
         outbox_rows = len(outbox(system.db.direct_dsn))
         assert (await load_dataset(client, tmp_path, config)).failures == {}
         assert len(outbox(system.db.direct_dsn)) == outbox_rows
+
+
+# ---------------- the query service on top of the same chain
+
+
+@asynccontextmanager
+async def query_client(system: System) -> AsyncIterator[httpx.AsyncClient]:
+    """The real query service (built the way main builds it), served in process."""
+    settings = QuerySettings(
+        qdrant_collection=system.settings.qdrant_collection, retriever_timeout_s=10.0
+    )
+    app = build_query_service(settings)
+    # the lifespan verifies the collection and the model, as a real start does
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://query") as client:
+            yield client
+
+
+async def load_the_five_products(system: System) -> None:
+    for doc_id, fields in PRODUCTS.items():
+        await system.post(doc_id, 1, **fields)
+    for doc_id in PRODUCTS:
+        await system.wait_until_indexed(doc_id, 1)
+
+
+async def test_the_search_flow_finds_products_whatever_the_capitalisation_and_hides_deleted_ones(
+    system: System,
+) -> None:
+    await load_the_five_products(system)
+    async with query_client(system) as client:
+
+        async def search(**body: Any) -> dict[str, Any]:
+            response = await client.post("/v1/search", json=body)
+            assert response.status_code == 200, response.text
+            answer: dict[str, Any] = response.json()
+            assert answer["degraded"] == []
+            return answer
+
+        # hybrid retrieval puts the right product first, in words and in meaning
+        for text, expected in (
+            ("cordless computer mouse", "mouse"),
+            ("light for reading at night", "lamp"),
+            ("phone charging cable", "cable"),
+            ("noise cancelling microphone", "headset"),
+        ):
+            assert (await search(query=text))["results"][0]["doc_id"] == expected
+        found = (await search(query="wireless mouse"))["results"][0]
+        assert (found["doc_id"], found["title"], found["brand"], found["color"]) == (
+            "mouse",
+            "Acme wireless mouse",
+            "Acme",
+            "black",
+        )
+
+        # capitalisation changes nothing: same products, same scores
+        lower = await search(query="wireless mouse", explain=True)
+        upper = await search(query="WIRELESS   MOUSE", explain=True)
+        assert [(r["doc_id"], r["score"]) for r in lower["results"]] == [
+            (r["doc_id"], r["score"]) for r in upper["results"]
+        ]
+
+        # filters are optional, exact on the folded value, and a filter nothing satisfies is empty
+        acme = await search(query="wireless", filters={"brand": "ACME"})
+        assert {r["doc_id"] for r in acme["results"]} == {"mouse", "keyboard"}
+        black_zeta = await search(query="usb", filters={"brand": " zeta ", "color": "BLACK"})
+        assert [r["doc_id"] for r in black_zeta["results"]] == ["cable"]
+        assert (await search(query="wireless", filters={"brand": "Puma"}))["results"] == []
+
+        # a deleted product is gone from the answer
+        await system.delete("lamp", 2)
+        await system.wait_until_indexed("lamp", 2)
+        after = await search(query="light for reading at night")
+        assert "lamp" not in {r["doc_id"] for r in after["results"]}
+
+
+async def test_the_chunk_flow_returns_chunks_and_can_be_restricted_to_shown_products(
+    system: System,
+) -> None:
+    await load_the_five_products(system)
+    async with query_client(system) as client:
+        everything = await client.post("/v1/chunks", json={"query": "wireless mouse"})
+        assert everything.status_code == 200
+        body = everything.json()
+        assert body["degraded"] == []
+        assert body["chunks"][0]["doc_id"] == "mouse"
+        assert all(chunk["text"] and chunk["title"] for chunk in body["chunks"])
+        only = await client.post(
+            "/v1/chunks", json={"query": "wireless mouse", "doc_ids": ["lamp", "cable"]}
+        )
+        assert {chunk["doc_id"] for chunk in only.json()["chunks"]} <= {"lamp", "cable"}
+        assert only.json()["chunks"]
+        one_each = await client.post(
+            "/v1/chunks", json={"query": "wireless mouse", "per_retriever_limit": 1}
+        )
+        assert len(one_each.json()["chunks"]) <= 2
+
+
+async def test_nike_and_NIKE_become_the_same_vectors_with_the_real_models(
+    system: System,
+) -> None:
+    encoder = OnnxQueryEncoder(system.query_embedder, timeout_s=30.0, dense_instruction=False)
+    assert await encoder.encode_dense("NIKE   Running SHOES") == await encoder.encode_dense(
+        "nike running shoes"
+    )
+    assert await encoder.encode_sparse("NIKE   Running SHOES") == await encoder.encode_sparse(
+        "nike running shoes"
+    )
+
+
+async def test_the_query_path_of_the_dense_model_works_and_for_bge_small_is_the_plain_path(
+    system: System,
+) -> None:
+    plain = OnnxQueryEncoder(system.query_embedder, timeout_s=30.0, dense_instruction=False)
+    prefixed = OnnxQueryEncoder(system.query_embedder, timeout_s=30.0, dense_instruction=True)
+    vector = await prefixed.encode_dense("wireless mouse")
+    assert len(vector) == 384
+    # a recorded fact, not a wish: fastembed's query path adds no prefix for bge small, so the
+    # setting dense_query_instruction changes nothing for this model, a model that needs a prefix
+    # (the bake-off may bring one) will make this line fail and say so
+    assert vector == await plain.encode_dense("wireless mouse")
+
+
+async def test_the_query_service_refuses_a_collection_built_for_another_model(
+    system: System,
+) -> None:
+    other = QuerySettings(qdrant_collection=system.settings.qdrant_collection, model_revision=2)
+    with pytest.raises(CollectionMismatch, match="model_version"):
+        await verify_collection(system.qdrant_client, other)
