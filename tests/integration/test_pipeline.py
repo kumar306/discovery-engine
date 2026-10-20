@@ -112,6 +112,23 @@ async def test_the_payload_carries_the_product_fields_a_search_filters_on(rig: R
     await rig.pipeline.handle(await rig.ingest("P1", 1, **fields))
     payloads = (await rig.points("P1")).values()
     assert {(p["locale"], p["brand"], p["color"]) for p in payloads} == {("us", "Acme", "black")}
+    assert {(p["title"], p["brand_key"], p["color_key"]) for p in payloads} == {
+        ("Acme mouse", "acme", "black")
+    }
+
+
+async def test_changing_only_the_title_writes_every_chunk_again_with_the_new_title(
+    rig: Rig,
+) -> None:
+    await rig.pipeline.handle(await rig.ingest("P1", 1))
+    event = await rig.ingest("P1", 2, **{**BASE, "title": "Acme mouse pro"})
+    assert await rig.pipeline.handle(event) is DONE
+    # the title is in the header of every chunk, so both chunks are new points
+    assert len(rig.embedder.calls) == 2
+    assert len(rig.embedder.calls[1]) == 2
+    live = [p for p in (await rig.points("P1")).values() if p["state"] == "live"]
+    assert len(live) == 2
+    assert {p["title"] for p in live} == {"Acme mouse pro"}
 
 
 async def test_an_update_embeds_only_the_chunk_that_changed(rig: Rig) -> None:

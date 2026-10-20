@@ -8,7 +8,12 @@ import pytest
 from qdrant_client import AsyncQdrantClient, models
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
-from libs.embedding.collection import CollectionMismatch, verify_collection
+from libs.embedding.collection import (
+    PAYLOAD_INDEXES,
+    CollectionMismatch,
+    filter_key,
+    verify_collection,
+)
 from services.embed.qdrant import (
     ChunkIndex,
     ChunkPayload,
@@ -38,6 +43,7 @@ def chunk(
         model_version=EmbedSettings().model_version,
         locale="us",
         text=f"text of chunk {number}",
+        title=f"title of chunk {number}",
         **fields,
     )
     dense = [float(number), 1.0, 0.5, 0.25][:TEST_DIM]
@@ -86,6 +92,8 @@ async def test_ensure_creates_the_collection_with_the_agreed_shape_and_repeats_c
         "doc_id": "keyword",
         "locale": "keyword",
         "version": "integer",
+        "brand_key": "keyword",
+        "color_key": "keyword",
     }
     # the fixture already created it, so a second call finds it right and changes nothing
     assert await ensure_collection(qdrant, collection) is False
@@ -182,17 +190,61 @@ async def test_a_collection_with_the_wrong_vector_setup_is_refused(
         metadata={"model_version": settings.model_version},
     )
     try:
-        for field, schema in (
-            ("state", models.PayloadSchemaType.KEYWORD),
-            ("doc_id", models.PayloadSchemaType.KEYWORD),
-            ("locale", models.PayloadSchemaType.KEYWORD),
-            ("version", models.PayloadSchemaType.INTEGER),
-        ):
+        for field, schema in PAYLOAD_INDEXES.items():
             await qdrant.create_payload_index(settings.qdrant_collection, field, schema)
         with pytest.raises(CollectionMismatch, match=complaint):
             await verify_collection(qdrant, settings)
     finally:
         await qdrant.delete_collection(settings.qdrant_collection)
+
+
+async def test_a_collection_with_only_the_old_payload_indexes_is_refused(
+    qdrant: AsyncQdrantClient,
+) -> None:
+    # a collection made before brand_key and color_key existed: the fix is to reset the dev stack
+    settings = EmbedSettings(
+        qdrant_collection=f"search_test_{uuid.uuid4().hex[:10]}", dense_dim=TEST_DIM
+    )
+    await qdrant.create_collection(
+        settings.qdrant_collection,
+        vectors_config={
+            "dense": models.VectorParams(size=TEST_DIM, distance=models.Distance.COSINE)
+        },
+        sparse_vectors_config={"bm25": models.SparseVectorParams(modifier=models.Modifier.IDF)},
+        metadata={"model_version": settings.model_version},
+    )
+    try:
+        for field in ("state", "doc_id", "locale"):
+            await qdrant.create_payload_index(
+                settings.qdrant_collection, field, models.PayloadSchemaType.KEYWORD
+            )
+        await qdrant.create_payload_index(
+            settings.qdrant_collection, "version", models.PayloadSchemaType.INTEGER
+        )
+        with pytest.raises(CollectionMismatch, match="payload index on brand_key"):
+            await verify_collection(qdrant, settings)
+    finally:
+        await qdrant.delete_collection(settings.qdrant_collection)
+
+
+async def test_a_filter_on_the_key_is_exact_so_the_caller_must_fold_the_value(
+    qdrant: AsyncQdrantClient, collection: EmbedSettings
+) -> None:
+    await index(collection, qdrant).stage([chunk(1, brand="Nike", color="Red")])
+
+    async def count(key: str, value: str) -> int:
+        where = models.Filter(
+            must=[models.FieldCondition(key=key, match=models.MatchValue(value=value))]
+        )
+        result = await qdrant.count(collection.qdrant_collection, count_filter=where, exact=True)
+        return result.count
+
+    assert await count("brand_key", filter_key("Nike")) == 1
+    assert await count("color_key", filter_key(" RED ")) == 1
+    # qdrant compares the stored string exactly, "Nike" is not "nike"
+    assert await count("brand_key", "Nike") == 0
+    # the original is still there for display
+    assert await count("brand", "Nike") == 1
 
 
 async def test_a_collection_missing_a_payload_index_is_refused(qdrant: AsyncQdrantClient) -> None:
@@ -231,12 +283,15 @@ async def test_staged_points_hold_both_vectors_and_the_payload_but_no_search_see
         "model_version": collection.model_version,
         "locale": "us",
         "text": "text of chunk 1",
+        "title": "title of chunk 1",
         "state": "staging",
         "brand": "Acme",
+        "brand_key": "acme",
         "color": "black",
+        "color_key": "black",
     }
-    # a missing brand or color is not stored at all
-    assert "brand" not in stored[ident(2)]
+    # a missing brand or color is not stored at all, and neither is its key
+    assert not {"brand", "brand_key", "color", "color_key"} & set(stored[ident(2)])
     assert await hits(qdrant, name, "live") == []
     assert await hits(qdrant, name, "staging") == [ident(1), ident(2)]
     vectors = (await qdrant.retrieve(name, ids=[str(ident(1))], with_vectors=True))[0].vector

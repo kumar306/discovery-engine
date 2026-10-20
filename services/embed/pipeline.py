@@ -11,7 +11,7 @@ from libs.observability.metrics import EmbedMetrics
 from libs.resilience.retry import PermanentError
 from libs.schemas import DocEvent, UpsertEvent, UpsertRequest
 from libs.schemas.hashing import chunk_id, content_sha
-from services.embed.compose import Chunk, compose
+from services.embed.compose import Chunk, compose, normalise
 from services.embed.diff import diff_chunks
 from services.embed.gate import GateState, VersionGateDecision, gate
 from services.embed.qdrant import ChunkPayload, IndexedChunk, LiveChunk
@@ -195,6 +195,7 @@ class Pipeline:
                         model_version=self._embed_settings.model_version,
                         locale=product.locale,
                         text=chunk.text,
+                        title=normalise(product.title),
                         brand=product.brand,
                         color=product.color,
                     ),

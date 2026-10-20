@@ -9,6 +9,7 @@ from libs.embedding.collection import (
     PAYLOAD_INDEXES,
     SPARSE,
     QdrantPointState,
+    filter_key,
     verify_collection,
 )
 from libs.settings import QdrantSettings
@@ -24,6 +25,7 @@ class ChunkPayload:
     model_version: str
     locale: str
     text: str
+    title: str
     brand: str | None = None
     color: str | None = None
 
@@ -163,13 +165,17 @@ def _payload(payload: ChunkPayload) -> dict[str, object]:
         "model_version": payload.model_version,
         "locale": payload.locale,
         "text": payload.text,
+        "title": payload.title,
         "state": QdrantPointState.QDRANT_POINT_STAGING.value,
     }
     # a missing brand or color is left out, a filter on it simply does not match
+    # the key is what filters compare, the original is what a result shows
     if payload.brand is not None:
         fields["brand"] = payload.brand
+        fields["brand_key"] = filter_key(payload.brand)
     if payload.color is not None:
         fields["color"] = payload.color
+        fields["color_key"] = filter_key(payload.color)
     return fields
 
 

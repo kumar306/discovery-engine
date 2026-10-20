@@ -1,3 +1,4 @@
+import unicodedata
 from enum import StrEnum
 
 from qdrant_client import AsyncQdrantClient, models
@@ -16,7 +17,22 @@ PAYLOAD_INDEXES = {
     "doc_id": models.PayloadSchemaType.KEYWORD,
     "locale": models.PayloadSchemaType.KEYWORD,
     "version": models.PayloadSchemaType.INTEGER,
+    # the lower case forms filters compare, see filter_key
+    "brand_key": models.PayloadSchemaType.KEYWORD,
+    "color_key": models.PayloadSchemaType.KEYWORD,
 }
+
+
+def filter_key(text: str) -> str:
+    """The form of a brand or a color that filters compare.
+
+    The worker stores it as brand_key and color_key, the query service applies it to the value in a
+    request, so "Nike", " NIKE " and "nike" all become "nike". Unicode is composed first, so an "e"
+    plus an accent and a single accented "e" give the same key, and case folding is the full
+    lower casing of Unicode ("Straße" becomes "strasse"), not only ASCII.
+    """
+    composed = unicodedata.normalize("NFC", text)
+    return " ".join(unicodedata.normalize("NFC", composed.casefold()).split())
 
 
 class QdrantPointState(StrEnum):
