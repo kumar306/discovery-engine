@@ -21,10 +21,8 @@ from services.query.settings import QuerySettings
 def build(settings: QuerySettings | None = None) -> FastAPI:
     settings = settings or QuerySettings()
     qdrant_client = AsyncQdrantClient(url=settings.qdrant_url, timeout=settings.qdrant_timeout_s)
-    embedder = build_onnx_embedder(settings)
-    encoder = OnnxQueryEncoder(
-        embedder, settings.encode_timeout_s, settings.dense_query_instruction
-    )
+    embedder = build_onnx_embedder(settings, workers=settings.encode_workers)
+    encoder = OnnxQueryEncoder(embedder, settings.encode_timeout_s)
     search = QdrantSearch(qdrant_client, settings.qdrant_collection)
     registry = CollectorRegistry()
     metrics = QueryMetrics(registry)

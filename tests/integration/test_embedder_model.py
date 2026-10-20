@@ -5,6 +5,7 @@ and its tokenizer behave the way the rest of the code assumes. Needs the model f
 the first download), no other service.
 """
 
+import asyncio
 import math
 from collections.abc import Iterator
 from itertools import pairwise
@@ -132,3 +133,19 @@ async def test_verify_passes_for_the_right_size_and_stops_a_wrong_one(
             await wrong.verify()
     finally:
         wrong.close()
+
+
+async def test_many_queries_at_once_on_several_model_threads_match_one_by_one() -> None:
+    # the model and its tokenizer are shared by the threads, this is the proof that is safe
+    many = build_onnx_embedder(EmbedSettings(), workers=4)
+    try:
+        words = "red blue green black white wireless cordless noise light cable mouse keyboard"
+        queries = [f"{word} running shoes number {n}" for n, word in enumerate(words.split() * 3)]
+        one_by_one = [await many.embed_query_dense(query, TIMEOUT) for query in queries]
+        together = await asyncio.gather(
+            *(many.embed_query_dense(query, TIMEOUT) for query in queries)
+        )
+    finally:
+        many.close()
+    for alone, shared in zip(one_by_one, together, strict=True):
+        assert max(abs(a - b) for a, b in zip(alone, shared, strict=True)) < 1e-5

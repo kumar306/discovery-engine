@@ -32,7 +32,9 @@ class QuerySettings(IndexSettings, HealthSettings):
     retriever_timeout_s: PositiveFloat = 2.0
     # the dense model call alone, it cannot be interrupted, only waited for
     encode_timeout_s: PositiveFloat = 2.0
-    # whether the dense model gets its query prefix, the ladder decides which is better
-    dense_query_instruction: bool = False
+    # threads that run the dense model for queries at the same time, each uses embed_threads cpu
+    # threads inside, so workers times embed_threads is what one process asks of the cores
+    # a guess until the aws benchmark, the worker that indexes keeps one
+    encode_workers: PositiveInt = 2
     # characters of the best chunk shown as the snippet of a result
     snippet_chars: PositiveInt = 300

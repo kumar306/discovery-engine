@@ -110,6 +110,7 @@ class OnnxEmbedder:
         limits: Limits,
         dense_dim: int,
         sub_batch: int,
+        workers: int = 1,
     ) -> None:
         self._dense = dense
         self._sparse = sparse
@@ -117,9 +118,10 @@ class OnnxEmbedder:
         self.limits = limits
         self._dense_dim = dense_dim
         self._sub_batch = sub_batch
-        # one worker thread: batches run one after the other, and the onnx runtime inside the
-        # model has its own thread count, so the cores are shared out by two plain numbers
-        self._onnx_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="embed")
+        # model calls run on this many worker threads (the worker that indexes uses one, the
+        # query service several), and the onnx runtime inside the model has its own thread
+        # count, so the cores are shared out by two plain numbers: workers times threads
+        self._onnx_executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="embed")
 
     async def embed(self, texts: Sequence[str], timeout_s: float) -> list[Embedding]:
         if not texts:
@@ -147,15 +149,14 @@ class OnnxEmbedder:
         # back in the order the caller sent them, a missing slot would be a bug and raise
         return [results[index] for index in range(len(texts))]
 
-    async def embed_query_dense(
-        self, text: str, timeout_s: float, instruction: bool
-    ) -> list[float]:
-        """The dense vector of one query. instruction switches on the model's query prefix."""
+    async def embed_query_dense(self, text: str, timeout_s: float) -> list[float]:
+        """The dense vector of one query, made the way a document is made."""
         loop = asyncio.get_running_loop()
-        run = functools.partial(self._query_dense, text, instruction)
+        run = functools.partial(self._query_dense, text)
         try:
-            # the model call itself cannot be interrupted, the timeout stops the waiting, and the
-            # bounded queue in front of the one worker thread is what the admission limit protects
+            # the model call itself cannot be interrupted, the timeout stops the waiting, a job
+            # that is still queued when its caller gives up is dropped, and the admission limit
+            # of the service bounds how many can be queued at all
             return await asyncio.wait_for(
                 loop.run_in_executor(self._onnx_executor, run), timeout=timeout_s
             )
@@ -166,9 +167,8 @@ class OnnxEmbedder:
         """The bm25 terms of one query: indices and weights. Cheap, so it needs no model thread."""
         return await asyncio.to_thread(self._query_sparse, text)
 
-    def _query_dense(self, text: str, instruction: bool) -> list[float]:
-        source = self._dense.query_embed if instruction else self._dense.embed
-        vector: list[float] = next(iter(source([text]))).tolist()
+    def _query_dense(self, text: str) -> list[float]:
+        vector: list[float] = next(iter(self._dense.embed([text]))).tolist()
         if len(vector) != self._dense_dim:
             raise ModelMismatch(
                 f"the model returns {len(vector)} floats, expected {self._dense_dim}"
@@ -223,7 +223,7 @@ class OnnxEmbedder:
         ]
 
 
-def build_onnx_embedder(settings: ModelSettings) -> OnnxEmbedder:
+def build_onnx_embedder(settings: ModelSettings, workers: int = 1) -> OnnxEmbedder:
     dense = TextEmbedding(settings.dense_model, threads=settings.embed_threads)
     sparse = SparseTextEmbedding("Qdrant/bm25", avg_len=settings.bm25_avg_len)
     # fastembed types its model as a base class that has no tokenizer, the onnx one has
@@ -236,6 +236,7 @@ def build_onnx_embedder(settings: ModelSettings) -> OnnxEmbedder:
         limits=Limits(max_tokens=hf_tokenizer.truncation["max_length"]),
         dense_dim=settings.dense_dim,
         sub_batch=settings.embed_sub_batch,
+        workers=workers,
     )
 
 

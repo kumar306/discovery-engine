@@ -30,17 +30,13 @@ class QueryEncoder(Protocol):
 
 
 class OnnxQueryEncoder:
-    def __init__(self, embedder: OnnxEmbedder, timeout_s: float, dense_instruction: bool) -> None:
+    def __init__(self, embedder: OnnxEmbedder, timeout_s: float) -> None:
         self._embedder = embedder
         self._timeout_s = timeout_s
-        # whether the dense model gets its query prefix, a setting until the ladder has measured it
-        self._dense_instruction = dense_instruction
 
     async def encode_dense(self, query: str) -> list[float]:
         text = normalise(query).casefold()
-        return await self._embedder.embed_query_dense(
-            text, self._timeout_s, self._dense_instruction
-        )
+        return await self._embedder.embed_query_dense(text, self._timeout_s)
 
     async def encode_sparse(self, query: str) -> SparseQuery:
         text = normalise(query).casefold()

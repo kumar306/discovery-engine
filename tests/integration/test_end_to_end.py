@@ -360,26 +360,13 @@ async def test_the_chunk_flow_returns_chunks_and_can_be_restricted_to_shown_prod
 async def test_nike_and_NIKE_become_the_same_vectors_with_the_real_models(
     system: System,
 ) -> None:
-    encoder = OnnxQueryEncoder(system.query_embedder, timeout_s=30.0, dense_instruction=False)
+    encoder = OnnxQueryEncoder(system.query_embedder, timeout_s=30.0)
     assert await encoder.encode_dense("NIKE   Running SHOES") == await encoder.encode_dense(
         "nike running shoes"
     )
     assert await encoder.encode_sparse("NIKE   Running SHOES") == await encoder.encode_sparse(
         "nike running shoes"
     )
-
-
-async def test_the_query_path_of_the_dense_model_works_and_for_bge_small_is_the_plain_path(
-    system: System,
-) -> None:
-    plain = OnnxQueryEncoder(system.query_embedder, timeout_s=30.0, dense_instruction=False)
-    prefixed = OnnxQueryEncoder(system.query_embedder, timeout_s=30.0, dense_instruction=True)
-    vector = await prefixed.encode_dense("wireless mouse")
-    assert len(vector) == 384
-    # a recorded fact, not a wish: fastembed's query path adds no prefix for bge small, so the
-    # setting dense_query_instruction changes nothing for this model, a model that needs a prefix
-    # (the bake-off may bring one) will make this line fail and say so
-    assert vector == await plain.encode_dense("wireless mouse")
 
 
 async def test_the_query_service_refuses_a_collection_built_for_another_model(
