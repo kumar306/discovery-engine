@@ -23,6 +23,15 @@ PAYLOAD_INDEXES = {
 }
 
 
+def normalise(text: str) -> str:
+    """Unicode NFC and one space between words, case kept.
+
+    Documents are cleaned with this before they are embedded, and queries before they are encoded,
+    so the same text is the same text on both sides.
+    """
+    return " ".join(unicodedata.normalize("NFC", text).split())
+
+
 def filter_key(text: str) -> str:
     """The form of a brand or a color that filters compare.
 

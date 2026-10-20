@@ -1,8 +1,8 @@
 import re
-import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from libs.embedding.collection import normalise
 from libs.embedding.model import Limits, Tokenizer
 from libs.resilience.retry import PermanentError
 from libs.schemas import UpsertRequest
@@ -31,10 +31,6 @@ class _Field:
     @property
     def text(self) -> str:
         return self.separator.join(self.units)
-
-
-def normalise(text: str) -> str:
-    return " ".join(unicodedata.normalize("NFC", text).split())
 
 
 def compose(product: UpsertRequest, tokenizer: Tokenizer, limits: Limits) -> tuple[Chunk, ...]:
