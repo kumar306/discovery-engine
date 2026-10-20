@@ -13,13 +13,13 @@ from pydantic import PositiveFloat, PositiveInt, model_validator
 from pydantic_settings import SettingsConfigDict
 
 from libs.db.pool import create_pool
+from libs.embedding.collection import qdrant_probe
 from libs.observability.health import Heartbeat, create_health_app, run_health_server
 from libs.observability.logging import configure_logging
 from libs.observability.metrics import MaintenanceMetrics
 from libs.observability.probes import postgres_probe
 from libs.resilience.shutdown import run_until_stopped
 from libs.settings import HealthSettings, PostgresSettings, QdrantSettings
-from services.embed.probes import qdrant_probe
 from services.embed.qdrant import ChunkIndex, new_client
 from services.embed.repository import ChunkRepository, ClaimedChunk
 

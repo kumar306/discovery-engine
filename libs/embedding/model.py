@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import time
 from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -70,6 +71,8 @@ class TextModel(Protocol):
     """The part of a fastembed model we use, so a fake can stand in for it in unit tests."""
 
     def embed(self, documents: list[str], **kwargs: Any) -> Iterable[Any]: ...
+
+    def query_embed(self, query: str | list[str], **kwargs: Any) -> Iterable[Any]: ...
 
 
 class ModelTokenizer:
@@ -143,6 +146,38 @@ class OnnxEmbedder:
             results.update(zip(indices, done, strict=True))
         # back in the order the caller sent them, a missing slot would be a bug and raise
         return [results[index] for index in range(len(texts))]
+
+    async def embed_query_dense(
+        self, text: str, timeout_s: float, instruction: bool
+    ) -> list[float]:
+        """The dense vector of one query. instruction switches on the model's query prefix."""
+        loop = asyncio.get_running_loop()
+        run = functools.partial(self._query_dense, text, instruction)
+        try:
+            # the model call itself cannot be interrupted, the timeout stops the waiting, and the
+            # bounded queue in front of the one worker thread is what the admission limit protects
+            return await asyncio.wait_for(
+                loop.run_in_executor(self._onnx_executor, run), timeout=timeout_s
+            )
+        except TimeoutError as error:
+            raise EmbedTransient(f"the dense query encoding took more than {timeout_s}s") from error
+
+    async def embed_query_sparse(self, text: str) -> tuple[list[int], list[float]]:
+        """The bm25 terms of one query: indices and weights. Cheap, so it needs no model thread."""
+        return await asyncio.to_thread(self._query_sparse, text)
+
+    def _query_dense(self, text: str, instruction: bool) -> list[float]:
+        source = self._dense.query_embed if instruction else self._dense.embed
+        vector: list[float] = next(iter(source([text]))).tolist()
+        if len(vector) != self._dense_dim:
+            raise ModelMismatch(
+                f"the model returns {len(vector)} floats, expected {self._dense_dim}"
+            )
+        return vector
+
+    def _query_sparse(self, text: str) -> tuple[list[int], list[float]]:
+        item = next(iter(self._sparse.query_embed(text)))
+        return item.indices.tolist(), item.values.tolist()
 
     async def verify(self) -> None:
         # at startup: a model of the wrong size must stop the process before it reads a message

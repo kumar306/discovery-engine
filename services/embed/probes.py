@@ -1,19 +1,9 @@
 from aiokafka import AIOKafkaConsumer
-from qdrant_client import AsyncQdrantClient
-
-from libs.observability.health import Probe
 
 # a probe is a function that returns when the dependency is fine and raises when it is not
 # the health app runs them, cuts them off after a timeout and shows only the type of the error
 # the postgres probe is shared by every process and lives in libs/observability/probes.py
-
-
-def qdrant_probe(qdrant_client: AsyncQdrantClient, collection: str) -> Probe:
-    async def probe() -> None:
-        # qdrant answers and still has the collection this worker was started for
-        await qdrant_client.get_collection(collection)
-
-    return probe
+# the qdrant probe is shared with the query service and lives in libs/embedding/collection.py
 
 
 class KafkaAssignmentProbe:

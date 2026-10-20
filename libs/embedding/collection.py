@@ -4,6 +4,7 @@ from enum import StrEnum
 from qdrant_client import AsyncQdrantClient, models
 
 from libs.embedding.settings import IndexSettings
+from libs.observability.health import Probe
 
 DENSE = "dense"
 SPARSE = "bm25"
@@ -21,6 +22,14 @@ PAYLOAD_INDEXES = {
     "brand_key": models.PayloadSchemaType.KEYWORD,
     "color_key": models.PayloadSchemaType.KEYWORD,
 }
+
+
+def qdrant_probe(qdrant_client: AsyncQdrantClient, collection: str) -> Probe:
+    async def probe() -> None:
+        # qdrant answers and still has the collection this process was started for
+        await qdrant_client.get_collection(collection)
+
+    return probe
 
 
 def normalise(text: str) -> str:

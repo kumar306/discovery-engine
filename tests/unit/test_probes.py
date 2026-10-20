@@ -3,7 +3,8 @@
 import pytest
 from aiokafka import TopicPartition
 
-from services.embed.probes import KafkaAssignmentProbe, qdrant_probe
+from libs.embedding.collection import qdrant_probe
+from services.embed.probes import KafkaAssignmentProbe
 
 
 class FakeQdrant:
