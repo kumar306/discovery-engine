@@ -2,6 +2,16 @@
 
 from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Annotated
+
+from pydantic import StringConstraints
+
+# the text of a query in a request: surrounding space removed, never empty, never long
+QueryText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)]
+
+
+class Unavailable(Exception):
+    """No retriever could answer, the caller should try again shortly (a 503)."""
 
 
 @dataclass(frozen=True)
@@ -17,6 +27,16 @@ class Hit:
     title: str
     brand: str | None
     color: str | None
+
+
+@dataclass(frozen=True)
+class Retrieval:
+    """What one retriever (encode, then search) gave back, hits is None when it failed."""
+
+    # dense or sparse
+    name: str
+    hits: list[Hit] | None
+    seconds: float
 
 
 @dataclass(frozen=True)

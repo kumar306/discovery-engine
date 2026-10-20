@@ -13,9 +13,10 @@ from typing import Literal
 from qdrant_client import AsyncQdrantClient, models
 
 from libs.embedding.collection import QdrantPointState
+from services.query.encoder import SparseQuery
 from services.query.primitives import Hit
 
-type Vector = Sequence[float] | models.SparseVector
+type Vector = Sequence[float] | SparseQuery
 
 
 @dataclass(frozen=True)
@@ -102,4 +103,6 @@ class QdrantSearch:
 
 
 def _as_query(vector: Vector) -> list[float] | models.SparseVector:
-    return vector if isinstance(vector, models.SparseVector) else list(vector)
+    if isinstance(vector, SparseQuery):
+        return models.SparseVector(indices=vector.indices, values=vector.values)
+    return list(vector)

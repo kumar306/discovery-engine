@@ -36,6 +36,42 @@ class IngestMetrics:
         )
 
 
+class QueryMetrics:
+    """What the query service counts, per route and per stage, never per query or per product."""
+
+    def __init__(self, registry: CollectorRegistry) -> None:
+        # route: the route template such as /v1/search, or other when none matched
+        # status_class: 2xx, 4xx or 5xx
+        self.requests = Counter(
+            "query_requests_total",
+            "Requests answered by the query service.",
+            ["route", "status_class"],
+            registry=registry,
+        )
+        self.request_seconds = Histogram(
+            "query_request_seconds",
+            "Time to answer one request.",
+            ["route"],
+            buckets=REQUEST_SECONDS_BUCKETS,
+            registry=registry,
+        )
+        # flow: search or chunks; stage: dense, sparse or fuse
+        self.stage_seconds = Histogram(
+            "query_stage_seconds",
+            "Time spent in one stage of a flow.",
+            ["flow", "stage"],
+            buckets=REQUEST_SECONDS_BUCKETS,
+            registry=registry,
+        )
+        # retriever: dense or sparse, the one that was left out of an answer
+        self.degraded = Counter(
+            "query_degraded_total",
+            "Answers served without one of the two retrievers.",
+            ["flow", "retriever"],
+            registry=registry,
+        )
+
+
 class EmbedMetrics:
     """What the indexing worker counts."""
 

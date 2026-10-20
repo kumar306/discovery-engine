@@ -3,18 +3,19 @@
 from typing import Literal
 
 import pytest
-from qdrant_client import AsyncQdrantClient, models
+from qdrant_client import AsyncQdrantClient
 
 from libs.embedding.collection import filter_key
 from services.embed.qdrant import ChunkIndex, LiveChunk
 from services.embed.settings import EmbedSettings
+from services.query.encoder import SparseQuery
 from services.query.search import Filters, QdrantSearch
 
 from .test_qdrant_index import chunk, ident
 
 # the dense query is close to every test chunk, the sparse query is on the term all of them share
 DENSE_QUERY = [1.0, 1.0, 0.5, 0.25]
-SPARSE_QUERY = models.SparseVector(indices=[1], values=[1.0])
+SPARSE_QUERY = SparseQuery(indices=[1], values=[1.0])
 
 Using = Literal["dense", "bm25"]
 
@@ -47,7 +48,7 @@ async def load_every_state(qdrant: AsyncQdrantClient, collection: EmbedSettings)
     return QdrantSearch(qdrant, collection.qdrant_collection)
 
 
-def vector_for(using: Using) -> list[float] | models.SparseVector:
+def vector_for(using: Using) -> list[float] | SparseQuery:
     return DENSE_QUERY if using == "dense" else SPARSE_QUERY
 
 

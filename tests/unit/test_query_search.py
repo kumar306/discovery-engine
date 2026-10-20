@@ -6,6 +6,7 @@ import pytest
 from qdrant_client import models
 from qdrant_client.http.models import QueryResponse
 
+from services.query.encoder import SparseQuery
 from services.query.primitives import Hit
 from services.query.search import Filters, QdrantSearch
 
@@ -122,11 +123,11 @@ async def test_a_chunk_search_does_not_group() -> None:
     assert "group_by" not in kwargs
 
 
-async def test_a_sparse_query_vector_is_passed_through_as_it_is() -> None:
+async def test_a_sparse_query_becomes_a_qdrant_sparse_vector() -> None:
     client = RecordingQdrant()
-    vector = models.SparseVector(indices=[2, 9], values=[1.0, 0.5])
+    vector = SparseQuery(indices=[2, 9], values=[1.0, 0.5])
     await search_with(client).grouped_search("bm25", vector, NO_FILTERS, 5)
-    assert client.calls[0][2]["query"] == vector
+    assert client.calls[0][2]["query"] == models.SparseVector(indices=[2, 9], values=[1.0, 0.5])
 
 
 async def test_points_become_hits_with_the_fields_a_result_needs() -> None:
