@@ -2,7 +2,7 @@
 COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 UV := uv run
 
-.PHONY: help setup up down topics init test test-integration test-crash test-spark lint typecheck eval bench chaos deploy data data-full load-mini load-full
+.PHONY: help setup up down topics init test test-integration test-crash test-spark lint typecheck eval bench chaos deploy data data-full load-mini load-full oracle
 
 help:            ## list targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-18s %s\n",$$1,$$2}'
@@ -52,6 +52,9 @@ load-mini:       ## send the mini set through the running ingest api and wait un
 
 load-full:       ## the same for the 100 thousand product set, run at will
 	$(UV) python scripts/load_data.py --size full
+
+oracle:          ## compare our sparse search with a reference bm25 on the real index, needs make load-mini
+	$(UV) pytest -m eval tests/eval/test_bm25_oracle.py -o addopts="" -s
 
 eval:            ## retrieval ladder + ranking + RAG eval, writes benchmarks/results/
 	$(UV) python -m eval.run --all

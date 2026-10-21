@@ -129,8 +129,10 @@ def write_result(
             raw_files=raw_checksums,
             notes=notes,
         )
+        # unix line endings on every machine, git turns windows ones into unix ones when the file
+        # is committed and a checksum taken before that would no longer match
         (staging / "result.json").write_text(
-            result.model_dump_json(indent=2) + "\n", encoding="utf-8"
+            result.model_dump_json(indent=2) + "\n", encoding="utf-8", newline="\n"
         )
         staging.rename(final_directory)
     except BaseException:

@@ -157,3 +157,12 @@ def test_a_benchmark_id_that_could_leave_the_results_folder_is_refused(tmp_path:
             metrics={},
             clock=lambda: NOW,
         )
+
+
+def test_result_json_uses_unix_line_endings_so_a_checksum_survives_a_commit_on_windows(
+    tmp_path: Path,
+) -> None:
+    # git turns windows line endings into unix ones when a file is committed, a hash taken
+    # before that would no longer match the committed file
+    directory = write(tmp_path)
+    assert b"\r" not in (directory / "result.json").read_bytes()

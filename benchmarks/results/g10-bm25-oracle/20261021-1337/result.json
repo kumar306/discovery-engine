@@ -1,0 +1,55 @@
+{
+  "benchmark_id": "g10-bm25-oracle",
+  "date_utc": "2026-10-21T13:37:38.671062+00:00",
+  "command": "make oracle",
+  "environment": {
+    "kind": "local"
+  },
+  "dataset": {
+    "corpus": "esci",
+    "hf_repo": "tasksource/esci",
+    "hf_revision": "8113b17a5d4099e20243282c926f1bc1a08a4d13",
+    "dataset_revision": 1,
+    "manifest_sha256": "7e8da343cb676634f283ca3b9d367a29384e8de8c26b73d3032c2e2e71a847bf",
+    "counts": {
+      "judgements": 1020,
+      "products": 5000,
+      "queries": 50,
+      "test": 50,
+      "train": 0,
+      "validation": 0
+    },
+    "index_loaded_from": "7e8da343cb676634f283ca3b9d367a29384e8de8c26b73d3032c2e2e71a847bf",
+    "model_version": "bge-small-en-v1.5_bm25-a256_1"
+  },
+  "config": {
+    "k1": 1.2,
+    "b": 0.75,
+    "avg_len_production": 256.0,
+    "depth": 50,
+    "overlap_k": 10,
+    "queries": 50
+  },
+  "metrics": {
+    "corpus_chunks": 6514.0,
+    "corpus_average_length": 117.9679152594412,
+    "assumed_average_length": 256.0,
+    "queries_compared": 50.0,
+    "queries_skipped": 0.0,
+    "production_overlap_at_10": 0.99,
+    "production_overlap_at_10_min": 0.6,
+    "production_top1_equal_rate": 0.98,
+    "production_rank_correlation": 0.9987164128809418,
+    "textbook_overlap_at_10": 0.89,
+    "textbook_overlap_at_10_min": 0.6,
+    "textbook_top1_equal_rate": 0.8,
+    "textbook_rank_correlation": 0.9400742120603804
+  },
+  "raw_files": {
+    "ours.txt": "456155becf1803ce5f39686a148d75bc09a65661f341e2ea5477602104af38d7",
+    "production.txt": "3fbe3ebbef018015d7759091da4339b0dc2bdcc4c11e58bf83be83146005cd26",
+    "textbook.txt": "207a58e57d00f062a7cc633457997a5e91da0d19b08a84d278ebef32daf903bc",
+    "per_query.jsonl": "e17903562aa45aa76ebdcb2931632bc516d08f37ec40f65daae8bf6f4333e319"
+  },
+  "notes": ""
+}
