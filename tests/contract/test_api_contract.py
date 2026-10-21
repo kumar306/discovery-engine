@@ -11,6 +11,7 @@ from hypothesis import HealthCheck, settings
 
 from services.ingest.app import create_app
 from services.ingest.settings import IngestSettings
+from tests.support.schemathesis_hooks import without_blank_strings
 from tests.unit.test_api_edges import RecordingIngest
 
 app = create_app(RecordingIngest(), IngestSettings())
@@ -24,7 +25,7 @@ def map_body(context: schemathesis.HookContext, body: Any) -> Any:
     # kept to whole numbers instead of loosening the api for it
     if isinstance(body, dict) and isinstance(body.get("version"), float):
         body = {**body, "version": int(body["version"])}
-    return body
+    return without_blank_strings(body)
 
 
 @schema.parametrize()

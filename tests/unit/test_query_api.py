@@ -271,6 +271,8 @@ async def test_two_empty_but_working_retrievers_are_an_empty_200(rig: Rig) -> No
 BAD_SEARCHES = [
     pytest.param({"query": ""}, id="empty query"),
     pytest.param({"query": "   "}, id="blank query"),
+    pytest.param({"query": "\x0b"}, id="query of a vertical tab"),
+    pytest.param({"query": "\u00a0\u2003"}, id="query of unicode spaces"),
     pytest.param({"query": "x" * 513}, id="query too long"),
     pytest.param({"query": 5}, id="query not a string"),
     pytest.param({}, id="no query"),
@@ -280,6 +282,7 @@ BAD_SEARCHES = [
     pytest.param({"query": "a", "extra": 1}, id="unknown field"),
     pytest.param({"query": "a", "filters": {"locale": "fr"}}, id="unknown locale"),
     pytest.param({"query": "a", "filters": {"brand": ""}}, id="empty brand"),
+    pytest.param({"query": "a", "filters": {"brand": "\u00a0"}}, id="brand of a no break space"),
     pytest.param({"query": "a", "filters": {"brand": "x" * 101}}, id="brand too long"),
 ]
 

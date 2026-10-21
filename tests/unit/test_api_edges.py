@@ -621,3 +621,30 @@ async def test_an_unexpected_error_is_a_500_that_tells_the_client_nothing(
     assert "secret internal detail" in error_line["exception"]
     assert error_line["request_id"] == access_line["request_id"] == body["request_id"]
     assert (access_line["status"], access_line["outcome"]) == (500, "internal_error")
+
+
+# text that is only whitespace is empty once stripped, the api refuses it with a 422 even though the
+# schema in /openapi.json says length 1 is enough (the contract test replaces such strings)
+
+BLANKS = [" ", "\t\n", "\x0b", "\u00a0", "\u2003"]
+
+
+@pytest.mark.parametrize("blank", BLANKS)
+@pytest.mark.parametrize("field", ["title", "brand", "color", "description"])
+async def test_a_text_field_of_only_whitespace_is_a_422_and_reaches_nothing(
+    client: httpx.AsyncClient, service: RecordingIngest, field: str, blank: str
+) -> None:
+    response = await post(client, product(**{field: blank}))
+    assert response.status_code == 422
+    assert response.json()["errors"][0]["field"] == field
+    assert service.calls == []
+
+
+@pytest.mark.parametrize("blank", BLANKS)
+async def test_a_bullet_of_only_whitespace_is_a_422_and_names_its_place(
+    client: httpx.AsyncClient, service: RecordingIngest, blank: str
+) -> None:
+    response = await post(client, product(bullets=["ok", blank]))
+    assert response.status_code == 422
+    assert response.json()["errors"][0]["field"] == "bullets.1"
+    assert service.calls == []

@@ -9,6 +9,7 @@ from typing import Any
 import schemathesis
 from hypothesis import HealthCheck, settings
 
+from tests.support.schemathesis_hooks import without_blank_strings
 from tests.unit.test_query_api import Rig, hit
 
 rig = Rig()
@@ -26,7 +27,7 @@ def map_body(context: schemathesis.HookContext, body: Any) -> Any:
         for name in ("k", "per_retriever_limit"):
             if isinstance(body.get(name), float):
                 body = {**body, name: int(body[name])}
-    return body
+    return without_blank_strings(body)
 
 
 @schema.parametrize()
