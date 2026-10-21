@@ -3,7 +3,8 @@
 needs the dev stack with ESCI-mini loaded (make load-mini), marker eval, so make test skips it
     make oracle
 writes benchmarks/results/g10-bm25-oracle/<time>/ with the numbers and the rankings
-there is no agreement threshold yet, it is set after the first measurement as a reviewed commit
+the production variant must have the same scores as ours at every rank (gap at most MAX_SCORE_GAP),
+the order measures and the textbook variant are written to the result but not gated
 """
 
 import hashlib
@@ -17,7 +18,7 @@ from fastembed import SparseTextEmbedding
 from qdrant_client import AsyncQdrantClient, models
 
 from eval.bm25 import Bm25Corpus, tokenise
-from eval.metrics import overlap_at, rank_correlation, top1_equal
+from eval.metrics import overlap_at, rank_correlation, score_gap_by_rank, top1_equal
 from eval.results import write_result
 from libs.embedding.collection import QdrantPointState, normalise, verify_collection
 from libs.embedding.model import OnnxEmbedder, build_onnx_embedder
@@ -32,6 +33,9 @@ RESULTS = Path("benchmarks/results")
 # how many chunks of each ranking are compared, and the k of overlap_at
 DEPTH = 50
 OVERLAP_K = 10
+# qdrant keeps float32 and the oracle float64, the measured gap was 1.6e-07 and float32 spacing is
+# about 6e-8, so this leaves about 60 times of margin, revise it if a library update moves it
+MAX_SCORE_GAP = 1e-5
 
 
 async def test_our_sparse_search_agrees_with_a_reference_bm25(tmp_path: Path) -> None:
@@ -107,7 +111,7 @@ async def test_our_sparse_search_agrees_with_a_reference_bm25(tmp_path: Path) ->
         run_lines: dict[str, list[str]] = {"ours": [], "production": [], "textbook": []}
         per_query: list[dict[str, object]] = []
         measures: dict[str, dict[str, list[float]]] = {
-            variant: {"overlap": [], "top1": [], "rho": []} for variant in average_of
+            variant: {"overlap": [], "top1": [], "rho": [], "gap": []} for variant in average_of
         }
         for query in queries:
             text = query["query"]
@@ -140,6 +144,11 @@ async def test_our_sparse_search_agrees_with_a_reference_bm25(tmp_path: Path) ->
                 overlap = overlap_at(OVERLAP_K, ours, reference)
                 first = top1_equal(ours, reference)
                 rho = rank_correlation(ours, reference)
+                # the scores standing at each rank, not the chunks: tie order does not matter and
+                # a chunk that ours lost moves every score below it up a rank and shows as a gap
+                gap = score_gap_by_rank(
+                    [hit.score for hit in hits], [item.score for item in ranked]
+                )
                 # a query that both sides answered with nothing is skipped, it is not agreement
                 if overlap is not None:
                     measures[variant]["overlap"].append(overlap)
@@ -147,10 +156,13 @@ async def test_our_sparse_search_agrees_with_a_reference_bm25(tmp_path: Path) ->
                     measures[variant]["top1"].append(1.0 if first else 0.0)
                 if rho is not None:
                     measures[variant]["rho"].append(rho)
+                if gap is not None:
+                    measures[variant]["gap"].append(gap)
                 row[f"{variant}_results"] = len(reference)
                 row[f"{variant}_overlap_at_10"] = overlap
                 row[f"{variant}_top1_equal"] = first
                 row[f"{variant}_rank_correlation"] = rho
+                row[f"{variant}_score_gap_by_rank"] = gap
             per_query.append(row)
     finally:
         if embedder is not None:
@@ -176,6 +188,8 @@ async def test_our_sparse_search_agrees_with_a_reference_bm25(tmp_path: Path) ->
         metrics[f"{variant}_overlap_at_10_min"] = min(values["overlap"])
         metrics[f"{variant}_top1_equal_rate"] = statistics.fmean(values["top1"])
         metrics[f"{variant}_rank_correlation"] = statistics.fmean(values["rho"])
+        metrics[f"{variant}_score_gap_max"] = max(values["gap"])
+        metrics[f"{variant}_score_gap_mean"] = statistics.fmean(values["gap"])
 
     # 8. one result folder, with the three rankings and the per query numbers as raw files
     raw_files = []
@@ -212,4 +226,9 @@ async def test_our_sparse_search_agrees_with_a_reference_bm25(tmp_path: Path) ->
     )
     print(f"\nresult written to {folder}")
     for name, value in sorted(metrics.items()):
-        print(f"  {name}: {value:.4f}")
+        print(f"  {name}: {value:.4g}")
+
+    # the gate comes after the write, so a failing run still leaves its numbers to look at
+    assert metrics["production_score_gap_max"] <= MAX_SCORE_GAP, (
+        "our scores differ from the reference bm25 with the assumed length, see " + str(folder)
+    )

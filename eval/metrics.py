@@ -187,16 +187,21 @@ def evaluate(run: Run, judgements: Judgements) -> Scores:
 
 
 def overlap_at(k: int, ours: Sequence[str], reference: Sequence[str]) -> float | None:
-    # share of the top k that both rankings have: |top k of ours and top k of reference| / k
+    # share of the top k that both rankings have: |top k of ours and top k of reference| / longer
     # 1.0 means the same set, 0.0 nothing in common, the order inside the top k does not matter
     # example k = 3, ours [a, b, c], reference [c, a, d]: a and c are in both, so 2 / 3
-    # a ranking shorter than k still divides by k, so it can never reach 1.0
+    # we divide by the longer of the two top k lists, not by k: a query with only 6 matching chunks
+    # gives 6 results on both sides, and dividing by k = 10 would score two identical lists as 0.6,
+    # a short list must not be punished for the corpus having few matches, only a real difference
+    # (a list that has chunks the other lacks, or one list shorter than the other) lowers the score
     # both empty is None (skip it), one empty is 0.0 (completely disjoint)
     if k < 1:
         raise ValueError("k must be at least 1")
     if not ours and not reference:
         return None
-    return len(set(ours[:k]) & set(reference[:k])) / k
+    ours_top = set(ours[:k])
+    reference_top = set(reference[:k])
+    return len(ours_top & reference_top) / max(len(ours_top), len(reference_top))
 
 
 def top1_equal(ours: Sequence[str], reference: Sequence[str]) -> bool | None:
@@ -231,3 +236,24 @@ def rank_correlation(ours: Sequence[str], reference: Sequence[str]) -> float | N
     )
     count = len(shared_in_our_order)
     return 1.0 - 6.0 * gap_squares / (count * (count * count - 1))
+
+
+def score_gap_by_rank(ours: Sequence[float], reference: Sequence[float]) -> float | None:
+    # the largest relative gap between the scores standing at the same rank, 0.0 is the same scores
+    # the lists hold scores best first, not chunk ids, so two tied chunks in the other order
+    # change nothing, and a chunk that one side lost shows up: every score below it moves up a
+    # rank and no longer matches (a comparison chunk by chunk would skip the lost chunk silently)
+    # gap at one rank = |a - b| / max(|a|, |b|), between 0.0 and 1.0, two zeros are no gap
+    # example ours [13, 12], reference [14, 13]: rank 1 gap 1/14, rank 2 gap 1/13, the answer 1/13
+    # a rank that only one list has is the largest gap, 1.0
+    # both empty is None (skip it)
+    if not ours and not reference:
+        return None
+    if len(ours) != len(reference):
+        return 1.0
+    largest_gap = 0.0
+    for our_score, reference_score in zip(ours, reference, strict=True):
+        bigger = max(abs(our_score), abs(reference_score))
+        if bigger > 0.0:
+            largest_gap = max(largest_gap, abs(our_score - reference_score) / bigger)
+    return largest_gap
