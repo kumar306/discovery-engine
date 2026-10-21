@@ -176,3 +176,58 @@ def evaluate(run: Run, judgements: Judgements) -> Scores:
         mrr_at_10=sum(q.mrr_at_10 for q in per_query) / count,
         queries=count,
     )
+
+
+# how much two rankings of the same chunks agree
+# used by the bm25 oracle test: it compares our sparse search with a reference ranking
+# every function takes chunk ids, best first, and says nothing about quality, only about agreement
+# a query where both rankings are empty has nothing to compare, the functions return None for it
+# and the caller leaves that query out of its average, an empty list that counted as "equal" would
+# raise the score for no reason
+
+
+def overlap_at(k: int, ours: Sequence[str], reference: Sequence[str]) -> float | None:
+    # share of the top k that both rankings have: |top k of ours and top k of reference| / k
+    # 1.0 means the same set, 0.0 nothing in common, the order inside the top k does not matter
+    # example k = 3, ours [a, b, c], reference [c, a, d]: a and c are in both, so 2 / 3
+    # a ranking shorter than k still divides by k, so it can never reach 1.0
+    # both empty is None (skip it), one empty is 0.0 (completely disjoint)
+    if k < 1:
+        raise ValueError("k must be at least 1")
+    if not ours and not reference:
+        return None
+    return len(set(ours[:k]) & set(reference[:k])) / k
+
+
+def top1_equal(ours: Sequence[str], reference: Sequence[str]) -> bool | None:
+    # are the first results the same chunk
+    # both empty is None (skip it), one empty is False (nothing to be equal to)
+    if not ours and not reference:
+        return None
+    if not ours or not reference:
+        return False
+    return ours[0] == reference[0]
+
+
+def rank_correlation(ours: Sequence[str], reference: Sequence[str]) -> float | None:
+    # how similar the order of two rankings is, over the ids that are in both (Spearman)
+    # 1.0 the same order, 0.0 unrelated, -1.0 reversed, None when fewer than two ids are shared
+    # each id gets its place among the shared ids in each list, then
+    # rho = 1 - 6 * sum(place gap squared) / (n * (n squared - 1))
+    # example ours [a, b, c, d], reference [a, c, b, d]: gaps squared 0, 1, 1, 0, n 4, rho 0.8
+    # the ids inside one list must be distinct, a repeated id has no single place
+    if len(set(ours)) != len(ours) or len(set(reference)) != len(reference):
+        raise ValueError("the ids inside a ranking must be distinct")
+    reference_ids = set(reference)
+    shared_in_our_order = [doc_id for doc_id in ours if doc_id in reference_ids]
+    if len(shared_in_our_order) < 2:
+        return None
+    shared_ids = set(shared_in_our_order)
+    shared_in_reference_order = [doc_id for doc_id in reference if doc_id in shared_ids]
+    place_in_reference = {doc_id: place for place, doc_id in enumerate(shared_in_reference_order)}
+    gap_squares = sum(
+        (place - place_in_reference[doc_id]) ** 2
+        for place, doc_id in enumerate(shared_in_our_order)
+    )
+    count = len(shared_in_our_order)
+    return 1.0 - 6.0 * gap_squares / (count * (count * count - 1))
