@@ -172,3 +172,22 @@ def test_the_quality_command_is_the_one_in_the_makefile() -> None:
     assert any(step.get("run") == "make quality" for step in steps)
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     assert re.search(r"^quality:.*\n\t\$\(UV\) python -m eval\.quality_job", makefile, re.MULTILINE)
+
+
+def test_qdrant_that_never_becomes_ready_fails_the_step_and_shows_its_log() -> None:
+    steps = steps_of(load("quality.yml"), "quality")
+    start = next(step for step in steps if "docker run" in str(step.get("run", "")))
+    # a loop that just ends when Qdrant is not ready hides the cause behind a later connection error
+    assert "exit 1" in start["run"]
+    assert "docker logs qdrant" in start["run"]
+
+
+def test_qdrant_gets_time_to_flush_before_the_storage_is_saved_and_its_log_is_kept_on_failure() -> (
+    None
+):
+    steps = steps_of(load("quality.yml"), "quality")
+    stop = next(step for step in steps if "docker stop" in str(step.get("run", "")))
+    # the default grace of 10 seconds may kill it in the middle of writing the files the cache saves
+    assert re.search(r"docker stop -t [3-9]\d", stop["run"])
+    logs = [step for step in steps if "docker logs qdrant" in str(step.get("run", ""))]
+    assert any(step.get("if") == "failure()" for step in logs)

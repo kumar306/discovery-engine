@@ -96,7 +96,16 @@ jobs:
         run: |
           mkdir -p .qdrant-storage
           docker run -d --name qdrant -p 6333:6333 -v "${{ github.workspace }}/.qdrant-storage:/qdrant/storage" qdrant/qdrant:v1.17.0
-          for attempt in $(seq 1 30); do curl -sf http://127.0.0.1:6333/readyz && break; sleep 2; done
+          for attempt in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:6333/readyz > /dev/null; then
+              echo "qdrant ready after $attempt attempts"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "qdrant did not become ready"
+          docker logs qdrant
+          exit 1
       # index (reused or built), ladder, gate: exit 0 passed, 1 failed, 2 could not run
       - name: index, ladder and gate
         run: make quality
@@ -106,8 +115,12 @@ jobs:
       - name: stop qdrant
         if: always()
         run: |
-          docker stop qdrant
+          docker stop -t 60 qdrant
           sudo chown -R "$(id -u):$(id -g)" .qdrant-storage
+      # what Qdrant said, only when something failed
+      - name: qdrant log
+        if: failure()
+        run: docker logs qdrant 2>&1 | tail -100
       # the numbers of this run, whatever the verdict, to be read or to make a baseline from
       - name: keep the result
         if: always()
