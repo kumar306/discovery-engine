@@ -272,6 +272,32 @@ async def run_ladder(
         )
 
 
+async def live_product_ids(qdrant_client: AsyncQdrantClient, collection: str) -> set[str]:
+    """The product id of every live chunk of the collection, read page by page."""
+    live = models.Filter(
+        must=[
+            models.FieldCondition(
+                key="state",
+                match=models.MatchValue(value=QdrantPointState.QDRANT_POINT_LIVE.value),
+            )
+        ]
+    )
+    product_ids: set[str] = set()
+    cursor = None
+    while True:
+        records, cursor = await qdrant_client.scroll(
+            collection,
+            scroll_filter=live,
+            limit=1000,
+            with_payload=["doc_id"],
+            with_vectors=False,
+            offset=cursor,
+        )
+        product_ids.update(str((record.payload or {})["doc_id"]) for record in records)
+        if cursor is None:
+            return product_ids
+
+
 async def run_on_dev_stack(config: LadderConfig) -> Path:
     """Open Qdrant and the model, check the collection, run the ladder, close everything."""
     settings = config.settings
@@ -281,28 +307,7 @@ async def run_on_dev_stack(config: LadderConfig) -> Path:
         # the collection must be the one built for the model version of these settings
         await verify_collection(qdrant_client, settings)
         # the product ids of every live chunk, to prove that the collection holds this dataset
-        live = models.Filter(
-            must=[
-                models.FieldCondition(
-                    key="state",
-                    match=models.MatchValue(value=QdrantPointState.QDRANT_POINT_LIVE.value),
-                )
-            ]
-        )
-        indexed_product_ids: set[str] = set()
-        cursor = None
-        while True:
-            records, cursor = await qdrant_client.scroll(
-                settings.qdrant_collection,
-                scroll_filter=live,
-                limit=1000,
-                with_payload=["doc_id"],
-                with_vectors=False,
-                offset=cursor,
-            )
-            indexed_product_ids.update(str((record.payload or {})["doc_id"]) for record in records)
-            if cursor is None:
-                break
+        indexed_product_ids = await live_product_ids(qdrant_client, settings.qdrant_collection)
         embedder = build_onnx_embedder(settings)
         return await run_ladder(
             config,

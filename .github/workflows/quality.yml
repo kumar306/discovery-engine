@@ -1,0 +1,117 @@
+name: quality
+
+# the retrieval quality gate: build (or restore) the index of ESCI-mini, run the ladder, fail when a
+# rung lost more than 2 percent against benchmarks/baseline/ladder-mini.json
+# it runs only when something that can move the numbers changed, the list is the one decided in the
+# spec of the ladder: chunking, embedding, the sparse (bm25) settings, the query code, the evaluation
+# code and the baseline itself
+on:
+  push:
+    branches: [main]
+    paths:
+      - "libs/embedding/**"
+      - "libs/schemas/**"
+      - "services/embed/compose.py"
+      - "services/embed/qdrant.py"
+      - "services/query/**"
+      - "eval/**"
+      - "scripts/download_data.py"
+      - "benchmarks/baseline/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/quality.yml"
+  pull_request:
+    paths:
+      - "libs/embedding/**"
+      - "libs/schemas/**"
+      - "services/embed/compose.py"
+      - "services/embed/qdrant.py"
+      - "services/query/**"
+      - "eval/**"
+      - "scripts/download_data.py"
+      - "benchmarks/baseline/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/quality.yml"
+  # a person can run it by hand from the Actions tab, for the first run on a new runner
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_LOCKED: "1"
+  # where fastembed keeps the models it downloads, so the cache step can save and restore them
+  FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.fastembed-cache
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    # a cold run builds the index of 6,514 chunks on the cpus of the runner, which is slow (12 to 20
+    # minutes on a laptop with 2 to 8 threads, not measured on a runner yet)
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.12.24"
+          enable-cache: true
+      - name: install the locked dependencies
+        run: uv sync
+      # the models, same key as the integration job
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .fastembed-cache
+          key: fastembed-bge-small-en-v1.5-bm25-1
+      # the mini dataset is a pure function of the pinned dataset revision and of the code that
+      # builds it, so it is stored under a key made of that code, the 4 test files (715 MB) are
+      # read from hugging face only when the key is new
+      - id: dataset
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: data/processed/mini
+          key: mini-${{ hashFiles('eval/build.py', 'eval/dataset.py', 'eval/source.py', 'scripts/download_data.py') }}
+      - name: build the mini dataset
+        if: steps.dataset.outputs.cache-hit != 'true'
+        run: make data
+      # the versions of the libraries that decide what a vector is (the model runtime, its tokenizer,
+      # the bm25 stemmer and hash, numpy), read from the installed environment; the lock file as a
+      # whole is NOT part of the key, a bump of any unrelated dependency would rebuild the index
+      - id: index_libs
+        run: echo "versions=$(uv run python -m eval.index_libs)" >> "$GITHUB_OUTPUT"
+      # the index is stored as the storage directory of Qdrant, under a key made of everything that
+      # defines its content: the version of Qdrant (its storage files depend on it), those library
+      # versions, the chunker, the embedder settings, the id and payload code, the builder and the
+      # dataset; code that only READS the index (the query service, the ladder, the gate) is not
+      # in the key, so a change there reuses the index
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .qdrant-storage
+          key: qdrant-v1.17.0-${{ steps.index_libs.outputs.versions }}-${{ hashFiles('libs/embedding/**', 'libs/schemas/**', 'services/embed/compose.py', 'services/embed/qdrant.py', 'eval/index_builder.py', 'eval/loader.py', 'data/processed/mini/manifest.json') }}
+      - name: start qdrant on the stored index
+        run: |
+          mkdir -p .qdrant-storage
+          docker run -d --name qdrant -p 6333:6333 -v "${{ github.workspace }}/.qdrant-storage:/qdrant/storage" qdrant/qdrant:v1.17.0
+          for attempt in $(seq 1 30); do curl -sf http://127.0.0.1:6333/readyz && break; sleep 2; done
+      # index (reused or built), ladder, gate: exit 0 passed, 1 failed, 2 could not run
+      - name: index, ladder and gate
+        run: make quality
+      # stopped before the job ends so Qdrant has written everything the cache step will save, and
+      # the files given back to the runner user: the container wrote them as root and the cache
+      # step could not read them
+      - name: stop qdrant
+        if: always()
+        run: |
+          docker stop qdrant
+          sudo chown -R "$(id -u):$(id -g)" .qdrant-storage
+      # the numbers of this run, whatever the verdict, to be read or to make a baseline from
+      - name: keep the result
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ladder-result
+          path: benchmarks/results/g6-ladder-mini

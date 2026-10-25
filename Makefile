@@ -2,7 +2,7 @@
 COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 UV := uv run
 
-.PHONY: help setup up down topics init test test-integration test-crash test-spark lint typecheck eval bench chaos deploy data data-full load-mini load-full oracle build-index gate baseline
+.PHONY: help setup up down topics init test test-integration test-crash test-spark lint typecheck eval bench chaos deploy data data-full load-mini load-full oracle build-index gate baseline quality
 
 help:            ## list targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-18s %s\n",$$1,$$2}'
@@ -61,6 +61,9 @@ build-index:     ## fill a Qdrant collection straight from a dataset (no Kafka, 
 
 gate:            ## run the ladder, then fail if a rung lost more than 2 percent against benchmarks/baseline/ladder-mini.json
 	$(UV) python -m eval.ladder && $(UV) python -m eval.gate check
+
+quality:         ## CI in one command: build or reuse the index of the mini set, run the ladder, run the gate (needs Qdrant on 6333)
+	$(UV) python -m eval.quality_job
 
 baseline:        ## write a PROPOSED baseline from the newest ladder result, read it and commit it on purpose
 	$(UV) python -m eval.gate propose
