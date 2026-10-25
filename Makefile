@@ -2,7 +2,7 @@
 COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 UV := uv run
 
-.PHONY: help setup up down topics init test test-integration test-crash test-spark lint typecheck eval bench chaos deploy data data-full load-mini load-full oracle build-index
+.PHONY: help setup up down topics init test test-integration test-crash test-spark lint typecheck eval bench chaos deploy data data-full load-mini load-full oracle build-index gate baseline
 
 help:            ## list targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-18s %s\n",$$1,$$2}'
@@ -58,6 +58,12 @@ oracle:          ## compare our sparse search with a reference bm25 on the real 
 
 build-index:     ## fill a Qdrant collection straight from a dataset (no Kafka, Postgres or S3), see eval/index_builder.py
 	$(UV) python -m eval.index_builder
+
+gate:            ## run the ladder, then fail if a rung lost more than 2 percent against benchmarks/baseline/ladder-mini.json
+	$(UV) python -m eval.ladder && $(UV) python -m eval.gate check
+
+baseline:        ## write a PROPOSED baseline from the newest ladder result, read it and commit it on purpose
+	$(UV) python -m eval.gate propose
 
 eval:            ## retrieval ladder on the loaded mini set, writes benchmarks/results/g6-ladder-mini
 	$(UV) python -m eval.ladder
