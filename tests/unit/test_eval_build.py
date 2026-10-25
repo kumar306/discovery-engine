@@ -124,7 +124,7 @@ def test_the_mini_text_is_read_from_few_row_groups(root: Path, tmp_path: Path) -
     import eval.source as source_module
 
     reads: list[int] = []
-    original = source_module.read_products
+    original = source_module.read_product_text_heavy_pass
 
     def spying(*args: object, **kwargs: object) -> object:
         row_group_numbers = kwargs["row_group_numbers"]
@@ -133,13 +133,13 @@ def test_the_mini_text_is_read_from_few_row_groups(root: Path, tmp_path: Path) -
 
     import eval.build as build_module
 
-    build_module.read_products = spying  # type: ignore[assignment]
+    build_module.read_product_text_heavy_pass = spying  # type: ignore[assignment]
     try:
         out = tmp_path / "out"
         out.mkdir()
         build_mini_dataset(FILES, Opener(root), CONFIG, out, dataset_revision=1)
     finally:
-        build_module.read_products = original
+        build_module.read_product_text_heavy_pass = original
     assert 0 < sum(reads) <= 5
 
 

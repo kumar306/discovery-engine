@@ -14,8 +14,8 @@ from eval.dataset import Pair
 from eval.source import (
     SourceFile,
     plan_reads,
-    read_pairs,
-    read_products,
+    read_judgement_rows_light_pass,
+    read_product_text_heavy_pass,
     source_files,
 )
 from tests.support.esci_fixture import esci_row, write_esci_parquet
@@ -94,7 +94,9 @@ def test_file(tmp_path: Path) -> SourceFile:
 def test_only_english_rows_of_the_small_version_become_pairs(
     tmp_path: Path, test_file: SourceFile
 ) -> None:
-    pairs, _ = read_pairs(opener(tmp_path), test_file, locale="us", small_version=1)
+    pairs, _ = read_judgement_rows_light_pass(
+        opener(tmp_path), test_file, locale="us", small_version=1
+    )
     assert [(p.query_id, p.product_id, p.label) for p in pairs] == [
         (1, "P1", "E"),
         (1, "P2", "S"),
@@ -109,7 +111,9 @@ def test_only_english_rows_of_the_small_version_become_pairs(
 def test_a_pair_carries_the_search_text_the_locale_and_the_file_it_came_from(
     tmp_path: Path, test_file: SourceFile
 ) -> None:
-    pairs, _ = read_pairs(opener(tmp_path), test_file, locale="us", small_version=1)
+    pairs, _ = read_judgement_rows_light_pass(
+        opener(tmp_path), test_file, locale="us", small_version=1
+    )
     assert pairs[0] == Pair(
         query_id=1,
         query="query 1",
@@ -124,7 +128,9 @@ def test_a_pair_carries_the_search_text_the_locale_and_the_file_it_came_from(
 def test_it_remembers_in_which_row_groups_each_kept_product_was_found(
     tmp_path: Path, test_file: SourceFile
 ) -> None:
-    _, groups = read_pairs(opener(tmp_path), test_file, locale="us", small_version=1)
+    _, groups = read_judgement_rows_light_pass(
+        opener(tmp_path), test_file, locale="us", small_version=1
+    )
     # row group number -> the products with a kept row in it
     assert groups == {0: {"P1", "P2"}, 1: {"P2", "P5"}, 2: {"P1", "P6", "P7"}}
 
@@ -135,7 +141,7 @@ def test_it_remembers_in_which_row_groups_each_kept_product_was_found(
 def test_the_text_is_read_only_for_the_wanted_products_in_the_chosen_row_groups(
     tmp_path: Path, test_file: SourceFile
 ) -> None:
-    products = read_products(
+    products = read_product_text_heavy_pass(
         opener(tmp_path),
         test_file,
         wanted_product_ids={"P1", "P2", "P6"},
@@ -167,7 +173,7 @@ def test_missing_text_fields_become_none_and_a_missing_title_becomes_empty(
     ]
     write_esci_parquet(tmp_path / "data" / "f.parquet", rows, row_group_size=3)
     source = SourceFile("data/f.parquet", "train", 1, "a" * 64)
-    (product,) = read_products(
+    (product,) = read_product_text_heavy_pass(
         opener(tmp_path), source, wanted_product_ids={"P1"}, row_group_numbers={0}, locale="us"
     )
     assert (product.title, product.description, product.bullet_point) == ("", None, None)
@@ -275,7 +281,9 @@ def test_the_label_words_of_the_dataset_become_the_letters_the_code_uses(tmp_pat
     ]
     write_esci_parquet(tmp_path / "data" / "f.parquet", rows, row_group_size=10)
     source = SourceFile("data/f.parquet", "train", 1, "a" * 64)
-    pairs, _ = read_pairs(opener(tmp_path), source, locale="us", small_version=1)
+    pairs, _ = read_judgement_rows_light_pass(
+        opener(tmp_path), source, locale="us", small_version=1
+    )
     assert [p.label for p in pairs] == ["E", "S", "C", "I"]
 
 
@@ -284,14 +292,14 @@ def test_a_label_word_nobody_knows_is_refused_with_the_file_name(tmp_path: Path)
     write_esci_parquet(tmp_path / "data" / "f.parquet", rows, row_group_size=10)
     source = SourceFile("data/f.parquet", "train", 1, "a" * 64)
     with pytest.raises(ValueError, match=r"Maybe.*f\.parquet"):
-        read_pairs(opener(tmp_path), source, locale="us", small_version=1)
+        read_judgement_rows_light_pass(opener(tmp_path), source, locale="us", small_version=1)
 
 
 def test_the_text_of_a_product_row_in_another_language_is_not_read(
     tmp_path: Path, test_file: SourceFile
 ) -> None:
     # P3 has a row in group 0 but it is a spanish row, and P3 has no english row at all
-    products = read_products(
+    products = read_product_text_heavy_pass(
         opener(tmp_path), test_file, wanted_product_ids={"P3"}, row_group_numbers={0}, locale="us"
     )
     assert products == []

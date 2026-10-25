@@ -7,13 +7,20 @@ from eval.dataset import (
     Pair,
     Product,
     SelectionConfig,
-    build_mini,
-    choose_mini,
-    collect_products,
-    select,
+    add_distractors_to_mini_selection,
+    dedupe_and_check_products,
+    pick_mini_test_queries,
+    pick_queries_and_assign_buckets,
     write_dataset,
 )
-from eval.source import OpenFile, SourceFile, Where, plan_reads, read_pairs, read_products
+from eval.source import (
+    OpenFile,
+    SourceFile,
+    Where,
+    plan_reads,
+    read_judgement_rows_light_pass,
+    read_product_text_heavy_pass,
+)
 
 # the two ways to build the dataset on disk from the parquet files
 #   build_mini_dataset: the small set for development and CI, it needs only the test files
@@ -22,14 +29,14 @@ from eval.source import OpenFile, SourceFile, Where, plan_reads, read_pairs, rea
 # text of the chosen products from as few row groups as possible, and write the files
 
 
-def _read_light(
+def _light_pass_over_files(
     open_file: OpenFile, files: Sequence[SourceFile], config: SelectionConfig
 ) -> tuple[list[Pair], dict[Where, set[str]]]:
     """The first pass over the files: all kept pairs, and which products are in which row group."""
     kept_pairs: list[Pair] = []
     product_ids_by_row_group: dict[Where, set[str]] = {}
     for source in files:
-        pairs_of_file, product_ids_by_row_group_number = read_pairs(
+        pairs_of_file, product_ids_by_row_group_number = read_judgement_rows_light_pass(
             open_file, source, locale=config.locale, small_version=config.small_version
         )
         kept_pairs.extend(pairs_of_file)
@@ -38,7 +45,7 @@ def _read_light(
     return kept_pairs, product_ids_by_row_group
 
 
-def _read_text(
+def _text_pass_over_files(
     open_file: OpenFile,
     files: Sequence[SourceFile],
     row_groups_to_download: set[Where],
@@ -51,7 +58,7 @@ def _read_text(
     for file_name in sorted({file_name for file_name, _ in row_groups_to_download}):
         row_group_numbers = {number for name, number in row_groups_to_download if name == file_name}
         products.extend(
-            read_products(
+            read_product_text_heavy_pass(
                 open_file,
                 file_by_name[file_name],
                 wanted_product_ids=product_ids_to_fetch,
@@ -71,11 +78,15 @@ def build_mini_dataset(
 ) -> dict[str, Any]:
     # the mini set is made of test queries, so only the test files are read at all
     test_split_files = [source for source in files if source.split == "test"]
-    kept_pairs, product_ids_by_row_group = _read_light(open_file, test_split_files, config)
+    kept_pairs, product_ids_by_row_group = _light_pass_over_files(
+        open_file, test_split_files, config
+    )
     # a pool of queries three times bigger than the mini set needs, the mini queries and the
     # distractors are taken from it
-    query_pool = select(kept_pairs, replace(config, target_products=config.mini_products * 3))
-    _, mini_judgements = choose_mini(query_pool, config)
+    query_pool = pick_queries_and_assign_buckets(
+        kept_pairs, replace(config, target_products=config.mini_products * 3)
+    )
+    _, mini_judgements = pick_mini_test_queries(query_pool, config)
     mini_query_product_ids = {j.product_id for j in mini_judgements}
     # decide which row groups to read the text from, the products of the mini queries first,
     # then only as many more as it takes to have enough distractors
@@ -88,11 +99,13 @@ def build_mini_dataset(
         config.seed,
         allowed_distractor_product_ids=query_pool.product_ids,
     )
-    mini_selection = build_mini(query_pool, config, product_ids_in_planned_blocks)
+    mini_selection = add_distractors_to_mini_selection(
+        query_pool, config, product_ids_in_planned_blocks
+    )
     product_ids_to_fetch = set(mini_selection.product_ids)
-    mini_products = collect_products(
+    mini_products = dedupe_and_check_products(
         mini_selection.product_ids,
-        _read_text(
+        _text_pass_over_files(
             open_file,
             test_split_files,
             row_groups_to_download,
@@ -114,16 +127,18 @@ def build_full_dataset(
     directory: Path,
     dataset_revision: int,
 ) -> dict[str, Any]:
-    kept_pairs, product_ids_by_row_group = _read_light(open_file, files, config)
-    selection = select(kept_pairs, config)
+    kept_pairs, product_ids_by_row_group = _light_pass_over_files(open_file, files, config)
+    selection = pick_queries_and_assign_buckets(kept_pairs, config)
     product_ids_to_fetch = set(selection.product_ids)
     # no distractors to find here, every selected product needs its text
     row_groups_to_download, _ = plan_reads(
         product_ids_by_row_group, product_ids_to_fetch, 0, config.seed
     )
-    selection_products = collect_products(
+    selection_products = dedupe_and_check_products(
         selection.product_ids,
-        _read_text(open_file, files, row_groups_to_download, product_ids_to_fetch, config.locale),
+        _text_pass_over_files(
+            open_file, files, row_groups_to_download, product_ids_to_fetch, config.locale
+        ),
     )
     directory.mkdir(parents=True, exist_ok=True)
     sources = [asdict(source) for source in files]

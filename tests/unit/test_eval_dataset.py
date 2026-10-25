@@ -19,11 +19,11 @@ from eval.dataset import (
     Product,
     Selection,
     SelectionConfig,
-    build_mini,
-    choose_mini,
-    collect_products,
+    add_distractors_to_mini_selection,
+    dedupe_and_check_products,
+    pick_mini_test_queries,
+    pick_queries_and_assign_buckets,
     restrict,
-    select,
     stable_rank,
     verify_dataset,
     write_dataset,
@@ -68,7 +68,7 @@ def judgements_of(selection: Selection, query_id: int) -> dict[str, str]:
 
 @pytest.fixture
 def selection() -> Selection:
-    return select(raw_pairs(), CONFIG)
+    return pick_queries_and_assign_buckets(raw_pairs(), CONFIG)
 
 
 # the order that is the same on every machine
@@ -108,7 +108,7 @@ def test_the_same_pair_twice_collapses_but_two_labels_for_one_pair_are_refused()
 def test_a_query_found_in_both_the_train_and_the_test_file_is_refused() -> None:
     leaking = [pair(0, 0), pair(0, 1, dataset_split="test")]
     with pytest.raises(ValueError, match="both"):
-        select(leaking, CONFIG)
+        pick_queries_and_assign_buckets(leaking, CONFIG)
 
 
 # which queries are selected
@@ -139,7 +139,7 @@ def test_a_product_shared_by_several_selected_queries_is_listed_once(
 
 def test_a_small_pool_is_taken_whole_when_it_is_smaller_than_the_target() -> None:
     few = [pair(q, j) for q in range(3) for j in range(2)]
-    everything = select(few, replace(CONFIG, target_products=1000))
+    everything = pick_queries_and_assign_buckets(few, replace(CONFIG, target_products=1000))
     assert len(everything.queries) == 3
 
 
@@ -147,11 +147,11 @@ def test_the_same_seed_gives_the_same_selection_whatever_the_order_of_the_rows(
     selection: Selection,
 ) -> None:
     shuffled = list(reversed(raw_pairs()))
-    assert select(shuffled, CONFIG) == selection
+    assert pick_queries_and_assign_buckets(shuffled, CONFIG) == selection
 
 
 def test_another_seed_selects_other_queries(selection: Selection) -> None:
-    other = select(raw_pairs(), replace(CONFIG, seed=2))
+    other = pick_queries_and_assign_buckets(raw_pairs(), replace(CONFIG, seed=2))
     assert {q.query_id for q in other.queries} != {q.query_id for q in selection.queries}
 
 
@@ -173,19 +173,27 @@ def test_the_test_queries_of_the_dataset_stay_test_and_validation_comes_only_fro
 
 
 def test_a_validation_share_of_zero_makes_none_and_a_share_of_one_makes_all_of_train() -> None:
-    none = select(raw_pairs(), replace(CONFIG, validation_share=0.0, target_products=1000))
+    none = pick_queries_and_assign_buckets(
+        raw_pairs(), replace(CONFIG, validation_share=0.0, target_products=1000)
+    )
     assert "validation" not in {q.split for q in none.queries}
-    every = select(raw_pairs(), replace(CONFIG, validation_share=1.0, target_products=1000))
+    every = pick_queries_and_assign_buckets(
+        raw_pairs(), replace(CONFIG, validation_share=1.0, target_products=1000)
+    )
     assert "train" not in {q.split for q in every.queries}
     assert {q.split for q in every.queries} == {"validation", "test"}
 
 
 def test_the_validation_queries_are_the_same_on_every_run() -> None:
     config = replace(CONFIG, target_products=1000, validation_share=0.3)
-    first = {q.query_id for q in select(raw_pairs(), config).queries if q.split == "validation"}
+    first = {
+        q.query_id
+        for q in pick_queries_and_assign_buckets(raw_pairs(), config).queries
+        if q.split == "validation"
+    }
     again = {
         q.query_id
-        for q in select(list(reversed(raw_pairs())), config).queries
+        for q in pick_queries_and_assign_buckets(list(reversed(raw_pairs())), config).queries
         if q.split == "validation"
     }
     assert first == again
@@ -197,7 +205,7 @@ def test_the_validation_queries_are_the_same_on_every_run() -> None:
 
 @pytest.fixture
 def mini(selection: Selection) -> Selection:
-    return build_mini(selection, CONFIG)
+    return add_distractors_to_mini_selection(selection, CONFIG)
 
 
 def test_the_mini_set_has_the_asked_number_of_queries_all_from_the_test_split(
@@ -226,8 +234,8 @@ def test_the_mini_set_has_the_asked_number_of_products_judged_ones_plus_distract
 
 
 def test_the_mini_set_is_the_same_on_every_run(selection: Selection, mini: Selection) -> None:
-    assert build_mini(selection, CONFIG) == mini
-    other = build_mini(selection, replace(CONFIG, seed=2))
+    assert add_distractors_to_mini_selection(selection, CONFIG) == mini
+    other = add_distractors_to_mini_selection(selection, replace(CONFIG, seed=2))
     assert {q.query_id for q in other.queries} != {q.query_id for q in mini.queries} or (
         set(other.product_ids) != set(mini.product_ids)
     )
@@ -235,14 +243,14 @@ def test_the_mini_set_is_the_same_on_every_run(selection: Selection, mini: Selec
 
 def test_too_few_test_queries_for_the_mini_set_is_an_error(selection: Selection) -> None:
     with pytest.raises(ValueError, match="test queries"):
-        build_mini(selection, replace(CONFIG, mini_queries=99))
+        add_distractors_to_mini_selection(selection, replace(CONFIG, mini_queries=99))
 
 
 def test_a_mini_set_too_small_to_hold_the_judged_products_is_an_error(
     selection: Selection,
 ) -> None:
     with pytest.raises(ValueError, match="mini_products"):
-        build_mini(selection, replace(CONFIG, mini_products=2))
+        add_distractors_to_mini_selection(selection, replace(CONFIG, mini_products=2))
 
 
 # the product table
@@ -262,12 +270,12 @@ def product(product_id: str, title: str = "t") -> Product:
 
 def test_products_are_deduplicated_sorted_and_limited_to_the_ones_asked_for() -> None:
     rows = [product("B"), product("A"), product("B"), product("C")]
-    assert [p.product_id for p in collect_products(["B", "A"], rows)] == ["A", "B"]
+    assert [p.product_id for p in dedupe_and_check_products(["B", "A"], rows)] == ["A", "B"]
 
 
 def test_a_product_with_no_text_is_an_error() -> None:
     with pytest.raises(ValueError, match="missing"):
-        collect_products(["A", "Z"], [product("A")])
+        dedupe_and_check_products(["A", "Z"], [product("A")])
 
 
 # files and the manifest
@@ -353,25 +361,25 @@ def test_the_products_file_is_the_same_whatever_order_the_products_arrive_in(
 def test_the_choice_of_mini_queries_is_the_same_one_build_mini_uses(
     selection: Selection, mini: Selection
 ) -> None:
-    queries, judgements = choose_mini(selection, CONFIG)
+    queries, judgements = pick_mini_test_queries(selection, CONFIG)
     assert queries == mini.queries
     assert judgements == mini.judgements
 
 
 def test_distractors_come_only_from_the_pool_when_a_pool_is_given(selection: Selection) -> None:
-    _, judgements = choose_mini(selection, CONFIG)
+    _, judgements = pick_mini_test_queries(selection, CONFIG)
     judged = {j.product_id for j in judgements}
     others = [p for p in selection.product_ids if p not in judged]
     pool = set(others[:15])  # enough for the 25 - judged distractors we need
     needed = CONFIG.mini_products - len(judged)
     small = replace(CONFIG, mini_products=len(judged) + min(needed, len(pool)))
-    mini = build_mini(selection, small, product_ids_in_planned_blocks=pool)
+    mini = add_distractors_to_mini_selection(selection, small, product_ids_in_planned_blocks=pool)
     assert set(mini.product_ids) - judged <= pool
 
 
 def test_a_pool_too_small_for_the_distractors_is_an_error(selection: Selection) -> None:
     with pytest.raises(ValueError, match="distractors"):
-        build_mini(selection, CONFIG, product_ids_in_planned_blocks=set())
+        add_distractors_to_mini_selection(selection, CONFIG, product_ids_in_planned_blocks=set())
 
 
 def test_the_manifest_records_the_source_files_it_was_built_from(

@@ -12,12 +12,20 @@ from typing import Any
 # and writes the result as plain text files plus a manifest that records how it was made.
 #
 # the steps, in order:
-#   restrict()         keep only english rows of the small version, drop bad rows
-#   select()           pick searches (queries) until their products cover enough distinct products
-#   (inside select)    give every picked query a bucket: train, validation or test
-#   build_mini()       from the selection, a small set for development and CI
-#   collect_products() the text of the chosen products, one entry per product
-#   write_dataset()    write the files and the manifest, verify_dataset() checks them later
+#   restrict()
+#       keep only english rows of the small version, drop bad rows
+#   pick_queries_and_assign_buckets()
+#       pick searches (queries) until their products cover enough distinct products, and give
+#       every picked query a bucket: train, validation or test
+#   pick_mini_test_queries()
+#       from that selection, the test queries of the mini set and all their judgements
+#   add_distractors_to_mini_selection()
+#       from the selection, the mini set for development and CI: test queries, their judged
+#       products, and seeded distractors
+#   dedupe_and_check_products()
+#       the text of the chosen products, one entry per product, every chosen product present
+#   write_dataset()
+#       write the files and the manifest, verify_dataset() checks them later
 #
 # the repository never contains the rows themselves, only this code, the seed, the pinned
 # revision and the checksums in the manifest, the rows are downloaded and rebuilt from them
@@ -209,7 +217,7 @@ def _query_row(query_id: int, rows: list[Pair], config: SelectionConfig) -> Quer
     )
 
 
-def select(pairs: Iterable[Pair], config: SelectionConfig) -> Selection:
+def pick_queries_and_assign_buckets(pairs: Iterable[Pair], config: SelectionConfig) -> Selection:
     """From the raw rows, pick queries, give each one a bucket, and collect what they cover."""
     rows = restrict(pairs, config)
     _check_each_query_is_in_one_file(rows)
@@ -230,7 +238,7 @@ def select(pairs: Iterable[Pair], config: SelectionConfig) -> Selection:
     )
 
 
-def choose_mini(
+def pick_mini_test_queries(
     selection: Selection, config: SelectionConfig
 ) -> tuple[tuple[QueryRow, ...], tuple[JudgementRow, ...]]:
     """The queries of the mini set, and every judgement of those queries."""
@@ -248,7 +256,7 @@ def choose_mini(
     return tuple(chosen), judgements
 
 
-def build_mini(
+def add_distractors_to_mini_selection(
     selection: Selection,
     config: SelectionConfig,
     product_ids_in_planned_blocks: Collection[str] | None = None,
@@ -259,7 +267,7 @@ def build_mini(
     download script gives the products whose text it will read anyway, so the mini set
     needs few row groups.
     """
-    chosen, judgements = choose_mini(selection, config)
+    chosen, judgements = pick_mini_test_queries(selection, config)
     mini_query_product_ids = {j.product_id for j in judgements}
     if len(mini_query_product_ids) > config.mini_products:
         raise ValueError(
@@ -302,7 +310,7 @@ def build_mini(
     return Selection(chosen, judgements, product_ids)
 
 
-def collect_products(
+def dedupe_and_check_products(
     product_ids: Iterable[str], products: Iterable[Product]
 ) -> tuple[Product, ...]:
     """One entry per wanted product, sorted by id. The raw data repeats a product once per query."""

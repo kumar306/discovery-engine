@@ -106,7 +106,7 @@ def hf_opener() -> OpenFile:
     return open_file
 
 
-def read_pairs(
+def read_judgement_rows_light_pass(
     open_file: OpenFile, source: SourceFile, *, locale: str, small_version: int
 ) -> tuple[list[Pair], dict[int, set[str]]]:
     """The first pass over one file: its kept rows as Pair, and where its products are.
@@ -166,7 +166,7 @@ def read_pairs(
     return pairs, product_ids_by_row_group_number
 
 
-def read_products(
+def read_product_text_heavy_pass(
     open_file: OpenFile,
     source: SourceFile,
     *,
@@ -216,8 +216,9 @@ def plan_reads(
     must_have_product_ids: the products we must have the text of (those of the mini queries)
     distractors_needed: how many more products we want as distractors
     allowed_distractor_product_ids: the only products that may count as distractors, None means
-        any product, the mini build passes the products of its query pool, the same list
-        build_mini filters on, so the plan never counts a product build_mini would refuse
+        any product, the mini build passes the products of its query pool, the same list that
+        add_distractors_to_mini_selection filters on, so the plan never counts a product that
+        add_distractors_to_mini_selection would refuse
     Returns the row groups to download, and every product that has text in those row groups.
     """
     must_have_set = set(must_have_product_ids)
