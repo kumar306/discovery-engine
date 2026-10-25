@@ -1,0 +1,10 @@
+{
+  "dataset_manifest_sha256": "7e8da343cb676634f283ca3b9d367a29384e8de8c26b73d3032c2e2e71a847bf",
+  "model_version": "bge-small-en-v1.5_bm25-a256_1",
+  "ndcg_at_10": {
+    "bm25": 0.6144606525366738,
+    "dense": 0.6569061338334475,
+    "hybrid": 0.6704657738508141
+  },
+  "made_from": "benchmarks/results/g6-ladder-mini/20261025-0754"
+}
