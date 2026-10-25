@@ -1,4 +1,6 @@
 import math
+import random
+import statistics
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 
@@ -257,3 +259,54 @@ def score_gap_by_rank(ours: Sequence[float], reference: Sequence[float]) -> floa
         if bigger > 0.0:
             largest_gap = max(largest_gap, abs(our_score - reference_score) / bigger)
     return largest_gap
+
+
+# comparing two systems on the same queries
+
+
+@dataclass(frozen=True)
+class PairedGain:
+    """How much better the second system is than the first, and how sure we are."""
+
+    # the average gain over the queries we have
+    mean: float
+    # the interval that holds the true gain with 95 percent confidence
+    low: float
+    high: float
+    # how much the gain differs from query to query (sample standard deviation), the number that
+    # decides how many queries are needed to see a small gain: n = (2.8 * sd / gain) ** 2
+    sd: float
+
+
+def paired_bootstrap(
+    first: Sequence[float], second: Sequence[float], *, resamples: int, seed: int
+) -> PairedGain:
+    # first[i] and second[i] are the scores of two systems on the same query i
+    # the gain on one query is second[i] - first[i], and we report the mean gain over the queries
+    # with 50 queries that mean is noisy: another 50 queries would give another mean, so to see how
+    # much we draw 50 queries from our 50 WITH replacement (a query may come twice, another not at
+    # all), take the mean gain of that draw, and repeat `resamples` times
+    # the 2.5th and the 97.5th percentile of those means is a 95 percent interval
+    # the same drawn queries count for both systems (paired), which is why the interval is narrower
+    # than comparing two separate averages: a hard query is hard for both
+    # example first [0.5, 0.5], second [0.6, 0.4]: gains +0.1 and -0.1, mean 0, a draw of two
+    # queries has a mean of -0.1, 0 or +0.1, so the interval is -0.1 to +0.1: no sure gain
+    # the draws come from a seeded generator, the same input always gives the same interval
+    if len(first) != len(second):
+        raise ValueError("the two score lists must belong to the same queries")
+    if not first:
+        raise ValueError("no queries, there is nothing to compare")
+    if resamples < 1:
+        raise ValueError("at least one resample is needed")
+    gains = [after - before for before, after in zip(first, second, strict=True)]
+    generator = random.Random(seed)  # noqa: S311 - a repeatable sample, not a secret
+    draw_means = sorted(
+        statistics.fmean(generator.choices(gains, k=len(gains))) for _ in range(resamples)
+    )
+    return PairedGain(
+        mean=statistics.fmean(gains),
+        low=draw_means[int(0.025 * resamples)],
+        high=draw_means[math.ceil(0.975 * resamples) - 1],
+        # one query has no spread to measure, the sample standard deviation needs two
+        sd=statistics.stdev(gains) if len(gains) > 1 else 0.0,
+    )

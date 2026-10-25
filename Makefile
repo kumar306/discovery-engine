@@ -56,8 +56,8 @@ load-full:       ## the same for the 100 thousand product set, run at will
 oracle:          ## compare our sparse search with a reference bm25 on the real index, needs make load-mini
 	$(UV) pytest -m eval tests/eval/test_bm25_oracle.py -o addopts="" -s
 
-eval:            ## retrieval ladder + ranking + RAG eval, writes benchmarks/results/
-	$(UV) python -m eval.run --all
+eval:            ## retrieval ladder on the loaded mini set, writes benchmarks/results/g6-ladder-mini
+	$(UV) python -m eval.ladder
 
 bench:           ## load-test scenarios, writes benchmarks/results/
 	$(UV) python -m loadtest.run --all
