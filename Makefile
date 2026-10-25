@@ -2,7 +2,7 @@
 COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 UV := uv run
 
-.PHONY: help setup up down topics init test test-integration test-crash test-spark lint typecheck eval bench chaos deploy data data-full load-mini load-full oracle
+.PHONY: help setup up down topics init test test-integration test-crash test-spark lint typecheck eval bench chaos deploy data data-full load-mini load-full oracle build-index
 
 help:            ## list targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-18s %s\n",$$1,$$2}'
@@ -55,6 +55,9 @@ load-full:       ## the same for the 100 thousand product set, run at will
 
 oracle:          ## compare our sparse search with a reference bm25 on the real index, needs make load-mini
 	$(UV) pytest -m eval tests/eval/test_bm25_oracle.py -o addopts="" -s
+
+build-index:     ## fill a Qdrant collection straight from a dataset (no Kafka, Postgres or S3), see eval/index_builder.py
+	$(UV) python -m eval.index_builder
 
 eval:            ## retrieval ladder on the loaded mini set, writes benchmarks/results/g6-ladder-mini
 	$(UV) python -m eval.ladder
