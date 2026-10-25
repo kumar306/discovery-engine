@@ -1,0 +1,67 @@
+{
+  "benchmark_id": "g6-ladder-mini",
+  "date_utc": "2026-10-25T07:54:25.441640+00:00",
+  "command": "make eval",
+  "environment": {
+    "kind": "local"
+  },
+  "dataset": {
+    "corpus": "esci",
+    "hf_repo": "tasksource/esci",
+    "hf_revision": "8113b17a5d4099e20243282c926f1bc1a08a4d13",
+    "dataset_revision": 1,
+    "manifest_sha256": "7e8da343cb676634f283ca3b9d367a29384e8de8c26b73d3032c2e2e71a847bf",
+    "counts": {
+      "judgements": 1020,
+      "products": 5000,
+      "queries": 50,
+      "test": 50,
+      "train": 0,
+      "validation": 0
+    },
+    "index_loaded_from": "7e8da343cb676634f283ca3b9d367a29384e8de8c26b73d3032c2e2e71a847bf",
+    "model_version": "bge-small-en-v1.5_bm25-a256_1"
+  },
+  "config": {
+    "collection": "chunks_esci",
+    "dense_model": "BAAI/bge-small-en-v1.5",
+    "depth": 100,
+    "chunk_depth": 200,
+    "rrf_k": 60,
+    "resamples": 1000,
+    "seed": 7,
+    "queries": 50
+  },
+  "metrics": {
+    "queries_scored": 50.0,
+    "queries_unjudged": 0.0,
+    "bm25_ndcg_at_10": 0.6144606525366738,
+    "bm25_recall_at_100": 0.8611654456654456,
+    "bm25_mrr_at_10": 0.7055555555555556,
+    "dense_ndcg_at_10": 0.6569061338334475,
+    "dense_recall_at_100": 0.9278385225885226,
+    "dense_mrr_at_10": 0.7612222222222222,
+    "hybrid_ndcg_at_10": 0.6704657738508141,
+    "hybrid_recall_at_100": 0.9257670940170941,
+    "hybrid_mrr_at_10": 0.7568809523809524,
+    "hybrid_chunk_ndcg_at_10": 0.6694215719333575,
+    "hybrid_chunk_recall_at_100": 0.9281480463980464,
+    "hybrid_chunk_mrr_at_10": 0.7502142857142857,
+    "hybrid_minus_bm25_ndcg_mean": 0.056005121314140316,
+    "hybrid_minus_bm25_ndcg_low": 0.02390886096253575,
+    "hybrid_minus_bm25_ndcg_high": 0.09178027451495817,
+    "hybrid_minus_bm25_ndcg_sd": 0.12313863679656999,
+    "hybrid_minus_dense_ndcg_mean": 0.013559640017366571,
+    "hybrid_minus_dense_ndcg_low": -0.022958859001617725,
+    "hybrid_minus_dense_ndcg_high": 0.04941245372600109,
+    "hybrid_minus_dense_ndcg_sd": 0.12937011098172355
+  },
+  "raw_files": {
+    "bm25.txt": "f91c3627750b7d418280f6f4fdc25d702a07668f10407f0ef9366df2a44dcb14",
+    "dense.txt": "f1a04559cac21c92b0b65da39ce1057a7b930c0b99d648bae63eb96cd2068ee2",
+    "hybrid.txt": "23e9d5d16206eccaf46b2d905895a8b4bc3c0988369013bdc752c77648e9b55b",
+    "hybrid_chunk.txt": "7a7cec9d70e1b7b9dee1b254a32d0050637562b6c415978a80e0c2f367ae5373",
+    "per_query.jsonl": "56f88f56e7f5ebf7608d47455fcbdbe7c95ca51dc6b9253db5422f2c66cdc29d"
+  },
+  "notes": ""
+}
