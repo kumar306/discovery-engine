@@ -6,6 +6,7 @@ so most tests use this and only a handful load the real model (see test_embedder
 
 import hashlib
 import re
+from array import array
 from collections.abc import Sequence
 
 from libs.embedding.model import Embedding, Limits
@@ -26,7 +27,8 @@ def _numbers(text: str, count: int) -> list[float]:
         digest = hashlib.sha256(f"{block}:{text}".encode()).digest()
         values.extend(byte / 255 + 0.01 for byte in digest)
         block += 1
-    return values[:count]
+    # float32 exact, as the real model returns them (the embedding cache refuses anything else)
+    return array("f", values[:count]).tolist()
 
 
 class HashEmbedder:
