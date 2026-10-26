@@ -19,13 +19,14 @@ search sees, and a rerun writes only what is missing.
 import argparse
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
 
 from qdrant_client import AsyncQdrantClient
 
 from eval.dataset import Product
+from eval.embedding_cache import EmbeddingCache
 from eval.loader import product_to_request
 from libs.embedding.collection import normalise
 from libs.embedding.model import Embedder, EmbedPermanent, build_onnx_embedder
@@ -78,8 +79,16 @@ async def build_index(
     *,
     batch_chunks: int = 64,
     progress: Callable[[int, int], None] | None = None,
+    cache: EmbeddingCache | None = None,
+    product_ids: Collection[str] | None = None,
 ) -> BuildReport:
-    """Write every product of the dataset into the collection of `settings`, live."""
+    """Write the products of the dataset into the collection of `settings`, live.
+
+    product_ids, when given, limits the build to those products (the others in the file are read
+    past without a check): the distractor ladder builds the judged products plus the first
+    distractors. cache, when given, supplies the embeddings it holds and stores the ones it had to
+    compute, so a build can be repeated or resumed without embedding the same chunk twice.
+    """
     # every document got this version when the dataset was loaded through the api, so it is the
     # version of every point here too
     manifest = json.loads((dataset_directory / "manifest.json").read_text(encoding="utf-8"))
@@ -99,51 +108,69 @@ async def build_index(
         nonlocal batch, products_written, chunks_written
         if not batch:
             return
-        texts = [chunk.text for composed in batch for chunk in composed.chunks]
-        try:
-            embeddings = await embedder.embed(texts, settings.embed_timeout_s)
-        except EmbedPermanent as refused:
-            # the model refuses one text: the build stops and names the product that owns it
-            # (the worker would send such a document to the dead letter queue and go on, a
-            # comparison between models cannot)
-            first_text_of_product = 0
-            for composed in batch:
-                if refused.index < first_text_of_product + len(composed.chunks):
+        # every chunk of the batch with its id, in order
+        entries = [
+            (
+                composed,
+                chunk,
+                chunk_id(composed.request.doc_id, settings.model_version, chunk.content_hash),
+            )
+            for composed in batch
+            for chunk in composed.chunks
+        ]
+        # what the cache holds is not embedded again
+        embedding_of = (
+            cache.get_many([str(identifier) for _, _, identifier in entries]) if cache else {}
+        )
+        missing = [entry for entry in entries if str(entry[2]) not in embedding_of]
+        if missing:
+            try:
+                fresh = await embedder.embed(
+                    [chunk.text for _, chunk, _ in missing], settings.embed_timeout_s
+                )
+            except EmbedPermanent as refused:
+                # the model refuses one text: the build stops and names the product that owns it
+                # (the worker would send such a document to the dead letter queue and go on, a
+                # comparison between models cannot)
+                if 0 <= refused.index < len(missing):
                     raise BuildStopped(
-                        composed.request.doc_id, f"the model refused a text: {refused}"
+                        missing[refused.index][0].request.doc_id,
+                        f"the model refused a text: {refused}",
                     ) from refused
-                first_text_of_product += len(composed.chunks)
-            raise
+                raise
+            computed = {
+                str(identifier): embedding
+                for (_, _, identifier), embedding in zip(missing, fresh, strict=True)
+            }
+            if cache is not None:
+                cache.put_many(computed)
+            embedding_of = {**embedding_of, **computed}
         indexed: list[IndexedChunk] = []
         live: list[LiveChunk] = []
-        position = 0
-        for composed in batch:
+        for composed, chunk, identifier in entries:
             request = composed.request
-            for chunk in composed.chunks:
-                embedding = embeddings[position]
-                position += 1
-                identifier = chunk_id(request.doc_id, settings.model_version, chunk.content_hash)
-                indexed.append(
-                    IndexedChunk(
-                        identifier,
-                        embedding.dense,
-                        embedding.sparse_indices,
-                        embedding.sparse_values,
-                        ChunkPayload(
-                            doc_id=request.doc_id,
-                            version=version,
-                            chunk_idx=chunk.positions[0],
-                            content_hash=chunk.content_hash,
-                            model_version=settings.model_version,
-                            locale=request.locale,
-                            text=chunk.text,
-                            title=normalise(request.title),
-                            brand=request.brand,
-                            color=request.color,
-                        ),
-                    )
+            embedding = embedding_of[str(identifier)]
+            indexed.append(
+                IndexedChunk(
+                    identifier,
+                    embedding.dense,
+                    embedding.sparse_indices,
+                    embedding.sparse_values,
+                    ChunkPayload(
+                        doc_id=request.doc_id,
+                        version=version,
+                        chunk_idx=chunk.positions[0],
+                        content_hash=chunk.content_hash,
+                        model_version=settings.model_version,
+                        locale=request.locale,
+                        text=chunk.text,
+                        title=normalise(request.title),
+                        brand=request.brand,
+                        color=request.color,
+                    ),
                 )
-                live.append(LiveChunk(identifier, chunk.positions[0]))
+            )
+            live.append(LiveChunk(identifier, chunk.positions[0]))
         await index.stage(indexed)
         await qdrant.batch_update_points(
             settings.qdrant_collection,
@@ -161,6 +188,8 @@ async def build_index(
     with (dataset_directory / "products.jsonl").open(encoding="utf-8") as handle:
         for line in handle:
             product = Product(**json.loads(line))
+            if product_ids is not None and product.product_id not in product_ids:
+                continue
             try:
                 # the same conversion the bulk loader applies, with the api's own rules
                 request = UpsertRequest.model_validate(product_to_request(product, version))

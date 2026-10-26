@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from eval.dataset import JudgementRow, Product, QueryRow, Selection, SelectionConfig, write_dataset
+from eval.embedding_cache import EmbeddingCache
 from eval.index_builder import BuildStopped, build_index
 from libs.embedding.model import Embedding, EmbedPermanent
 from libs.schemas.hashing import chunk_id
@@ -295,3 +296,102 @@ async def test_an_empty_dataset_builds_an_empty_collection(tmp_path: Path) -> No
     assert (report.products, report.chunks) == (0, 0)
     assert fake.created == ["built"]
     assert fake.calls == []
+
+
+# ---------------- the embedding cache and the subset of products (the distractor ladder needs both)
+
+
+def snapshot(fake: FakeQdrant) -> dict[str, tuple[object, object]]:
+    return {point_id: (point.vector, point.payload) for point_id, point in fake.points.items()}
+
+
+async def test_a_second_build_from_the_cache_embeds_nothing_and_writes_the_same_points(
+    built: Path, tmp_path: Path
+) -> None:
+    with EmbeddingCache(tmp_path / "cache.sqlite") as cache:
+        first, first_model = FakeQdrant(), HashEmbedder(dense_dim=DIM, max_tokens=64)
+        await build_index(built, settings(), first, first_model, cache=cache)  # type: ignore[arg-type]
+        assert first_model.calls
+        second, second_model = FakeQdrant(), HashEmbedder(dense_dim=DIM, max_tokens=64)
+        await build_index(built, settings(), second, second_model, cache=cache)  # type: ignore[arg-type]
+    assert second_model.calls == []
+    assert snapshot(second) == snapshot(first)
+
+
+async def test_a_build_with_a_cache_writes_what_a_build_without_one_writes(
+    built: Path, tmp_path: Path
+) -> None:
+    plain = FakeQdrant()
+    await build_index(built, settings(), plain, HashEmbedder(dense_dim=DIM, max_tokens=64))  # type: ignore[arg-type]
+    cached = FakeQdrant()
+    with EmbeddingCache(tmp_path / "cache.sqlite") as cache:
+        await build_index(
+            built,
+            settings(),
+            cached,
+            HashEmbedder(dense_dim=DIM, max_tokens=64),
+            cache=cache,  # type: ignore[arg-type]
+        )
+    assert snapshot(cached) == snapshot(plain)
+
+
+async def test_only_the_chunks_the_cache_does_not_hold_are_embedded(
+    built: Path, tmp_path: Path
+) -> None:
+    with EmbeddingCache(tmp_path / "cache.sqlite") as cache:
+        # P1 only, so P0 (2 chunks) and P4 (1 chunk) are misses on the second build
+        await build_index(
+            built,
+            settings(),
+            FakeQdrant(),
+            HashEmbedder(dense_dim=DIM, max_tokens=64),  # type: ignore[arg-type]
+            cache=cache,
+            product_ids={"P1"},
+        )
+        model = HashEmbedder(dense_dim=DIM, max_tokens=64)
+        await build_index(built, settings(), FakeQdrant(), model, cache=cache)  # type: ignore[arg-type]
+    texts = [text for call in model.calls for text in call]
+    assert len(texts) == 3
+    assert not any("Plain pen" in text for text in texts)
+
+
+async def test_only_the_products_asked_for_are_written_and_the_others_are_not_an_error(
+    built: Path,
+) -> None:
+    fake = FakeQdrant()
+    report = await build_index(
+        built,
+        settings(),
+        fake,
+        HashEmbedder(dense_dim=DIM, max_tokens=64),  # type: ignore[arg-type]
+        product_ids={"P0", "P4", "NOT_IN_THE_DATASET"},
+    )
+    assert {p.payload["doc_id"] for p in fake.points.values()} == {"P0", "P4"}
+    assert (report.products, report.chunks) == (2, 3)
+
+
+async def test_a_refused_text_still_names_its_product_when_other_chunks_come_from_the_cache(
+    tmp_path: Path,
+) -> None:
+    items = [*products()[:2], REFUSED_BY_THE_MODEL]
+    dataset(tmp_path / "set", items)
+    with EmbeddingCache(tmp_path / "cache.sqlite") as cache:
+        # P0 and P1 are cached by an earlier build of them alone
+        await build_index(
+            tmp_path / "set",
+            settings(),
+            FakeQdrant(),
+            HashEmbedder(dense_dim=DIM, max_tokens=64),  # type: ignore[arg-type]
+            cache=cache,
+            product_ids={"P0", "P1"},
+        )
+        with pytest.raises(BuildStopped, match=r"P5.*refused") as stopped:
+            await build_index(
+                tmp_path / "set",
+                settings(),
+                FakeQdrant(),  # type: ignore[arg-type]
+                PoisonedEmbedder(dense_dim=DIM, max_tokens=64),
+                batch_chunks=100,
+                cache=cache,
+            )
+    assert stopped.value.product_id == "P5"
