@@ -2,7 +2,7 @@
 COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 UV := uv run
 
-.PHONY: help setup up down topics init test test-integration test-crash test-spark lint typecheck eval bench chaos deploy data data-full load-mini load-full oracle build-index gate baseline quality
+.PHONY: help setup up down topics init test test-integration test-crash test-spark lint typecheck eval bench chaos deploy data data-validation data-full load-mini load-full oracle build-index gate baseline quality
 
 help:            ## list targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-18s %s\n",$$1,$$2}'
@@ -43,6 +43,9 @@ test-spark:      ## Spark tests inside Docker (Windows hosts lack winutils)
 
 data:            ## build the small ESCI set in ./data (never committed), reads only the test files, in pieces
 	$(UV) python scripts/download_data.py --size mini
+
+data-validation: ## build the validation set (500 queries, 14263 products) from the train files, about 11 minutes, used to choose the dense model and avg_len
+	$(UV) python scripts/download_data.py --size validation --queries 500 --products 14263
 
 data-full:       ## build the 100 thousand product selection from all files, run at will
 	$(UV) python scripts/download_data.py --size full

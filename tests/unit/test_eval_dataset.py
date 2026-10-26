@@ -21,7 +21,7 @@ from eval.dataset import (
     SelectionConfig,
     add_distractors_to_mini_selection,
     dedupe_and_check_products,
-    pick_mini_test_queries,
+    pick_mini_queries_of_split,
     pick_queries_and_assign_buckets,
     restrict,
     stable_rank,
@@ -361,13 +361,13 @@ def test_the_products_file_is_the_same_whatever_order_the_products_arrive_in(
 def test_the_choice_of_mini_queries_is_the_same_one_build_mini_uses(
     selection: Selection, mini: Selection
 ) -> None:
-    queries, judgements = pick_mini_test_queries(selection, CONFIG)
+    queries, judgements = pick_mini_queries_of_split(selection, CONFIG, "test")
     assert queries == mini.queries
     assert judgements == mini.judgements
 
 
 def test_distractors_come_only_from_the_pool_when_a_pool_is_given(selection: Selection) -> None:
-    _, judgements = pick_mini_test_queries(selection, CONFIG)
+    _, judgements = pick_mini_queries_of_split(selection, CONFIG, "test")
     judged = {j.product_id for j in judgements}
     others = [p for p in selection.product_ids if p not in judged]
     pool = set(others[:15])  # enough for the 25 - judged distractors we need
@@ -391,3 +391,90 @@ def test_the_manifest_records_the_source_files_it_was_built_from(
         tmp_path, selection, products, CONFIG, dataset_revision=1, sources=sources
     )
     assert manifest["source_files"] == sources
+
+
+# the same picker for the validation split, used by the validation set
+
+
+def validation_count(selection: Selection) -> int:
+    return sum(1 for q in selection.queries if q.split == "validation")
+
+
+# half of the train queries are validation queries here, so there are enough of them to pick from
+HALF_VALIDATION = replace(CONFIG, validation_share=0.5)
+
+
+@pytest.fixture
+def validation_heavy() -> Selection:
+    return pick_queries_and_assign_buckets(raw_pairs(), HALF_VALIDATION)
+
+
+def test_the_queries_of_the_validation_split_can_be_picked_and_no_other(
+    selection: Selection,
+) -> None:
+    asked = validation_count(selection) // 2
+    assert asked >= 1
+    queries, judgements = pick_mini_queries_of_split(
+        selection, replace(CONFIG, mini_queries=asked), "validation"
+    )
+    assert len(queries) == asked
+    assert {q.split for q in queries} == {"validation"}
+    assert {j.query_id for j in judgements} == {q.query_id for q in queries}
+    for query in queries:
+        assert {j.product_id: j.label for j in judgements if j.query_id == query.query_id} == (
+            judgements_of(selection, query.query_id)
+        )
+
+
+def test_a_smaller_pick_of_a_split_lies_inside_a_bigger_pick_of_it(
+    validation_heavy: Selection,
+) -> None:
+    # the sets are nested: what is learned on 2 queries is a part of what is learned on 4
+    assert validation_count(validation_heavy) >= 4
+    small, small_judgements = pick_mini_queries_of_split(
+        validation_heavy, replace(HALF_VALIDATION, mini_queries=2), "validation"
+    )
+    big, big_judgements = pick_mini_queries_of_split(
+        validation_heavy, replace(HALF_VALIDATION, mini_queries=4), "validation"
+    )
+    assert {q.query_id for q in small} < {q.query_id for q in big}
+    assert set(small_judgements) < set(big_judgements)
+
+
+def test_asking_for_more_queries_than_a_split_has_names_the_split_and_both_numbers(
+    selection: Selection,
+) -> None:
+    total = validation_count(selection)
+    with pytest.raises(ValueError, match=rf"only {total} validation queries, 99 are needed"):
+        pick_mini_queries_of_split(selection, replace(CONFIG, mini_queries=99), "validation")
+
+
+def test_a_validation_mini_set_has_validation_queries_their_judged_products_and_distractors(
+    validation_heavy: Selection,
+) -> None:
+    config = replace(HALF_VALIDATION, mini_queries=3, mini_products=30)
+    mini = add_distractors_to_mini_selection(validation_heavy, config, split="validation")
+    assert len(mini.queries) == 3
+    assert {q.split for q in mini.queries} == {"validation"}
+    judged = {j.product_id for j in mini.judgements}
+    assert len(mini.product_ids) == 30
+    assert judged < set(mini.product_ids)
+    for query in mini.queries:
+        assert judgements_of(mini, query.query_id) == judgements_of(
+            validation_heavy, query.query_id
+        )
+
+
+def test_the_pick_follows_the_seed_and_not_the_query_number(validation_heavy: Selection) -> None:
+    picks = {}
+    for seed in range(1, 8):
+        queries, _ = pick_mini_queries_of_split(
+            validation_heavy, replace(HALF_VALIDATION, seed=seed, mini_queries=3), "validation"
+        )
+        picks[seed] = tuple(sorted(q.query_id for q in queries))
+    # another seed gives another pick (not one fixed pick such as the three lowest query numbers)
+    assert len(set(picks.values())) > 1
+    lowest = tuple(sorted(q.query_id for q in validation_heavy.queries if q.split == "validation"))[
+        :3
+    ]
+    assert any(pick != lowest for pick in picks.values())

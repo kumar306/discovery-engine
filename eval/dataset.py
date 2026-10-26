@@ -17,8 +17,9 @@ from typing import Any
 #   pick_queries_and_assign_buckets()
 #       pick searches (queries) until their products cover enough distinct products, and give
 #       every picked query a bucket: train, validation or test
-#   pick_mini_test_queries()
-#       from that selection, the test queries of the mini set and all their judgements
+#   pick_mini_queries_of_split()
+#       from that selection, the first N queries of one split (test or validation) in the
+#       seeded order, nested, and all their judgements
 #   add_distractors_to_mini_selection()
 #       from the selection, the mini set for development and CI: test queries, their judged
 #       products, and seeded distractors
@@ -238,17 +239,24 @@ def pick_queries_and_assign_buckets(pairs: Iterable[Pair], config: SelectionConf
     )
 
 
-def pick_mini_test_queries(
-    selection: Selection, config: SelectionConfig
+def pick_mini_queries_of_split(
+    selection: Selection, config: SelectionConfig, split: str
 ) -> tuple[tuple[QueryRow, ...], tuple[JudgementRow, ...]]:
-    """The queries of the mini set, and every judgement of those queries."""
-    test_queries = [q for q in selection.queries if q.split == "test"]
-    if len(test_queries) < config.mini_queries:
+    """The first mini_queries queries of one split in the seeded order, and all their judgements.
+
+    The order depends only on the seed and the query id, so the picks are nested: the 50 queries
+    of a set of 50 are the first 50 of a set of 500. split is "test" for the mini set that the CI
+    gate uses and "validation" for the set that decisions (the model, avg_len) are made on.
+    """
+    queries_of_split = [q for q in selection.queries if q.split == split]
+    if len(queries_of_split) < config.mini_queries:
         raise ValueError(
-            f"the selection has only {len(test_queries)} test queries, "
+            f"the selection has only {len(queries_of_split)} {split} queries, "
             f"{config.mini_queries} are needed"
         )
-    shuffled = sorted(test_queries, key=lambda q: stable_rank(config.seed, "mini", str(q.query_id)))
+    shuffled = sorted(
+        queries_of_split, key=lambda q: stable_rank(config.seed, "mini", str(q.query_id))
+    )
     chosen = sorted(shuffled[: config.mini_queries], key=lambda q: q.query_id)
     chosen_ids = {q.query_id for q in chosen}
     # all the judgements of the chosen queries, the selection is already sorted
@@ -260,14 +268,18 @@ def add_distractors_to_mini_selection(
     selection: Selection,
     config: SelectionConfig,
     product_ids_in_planned_blocks: Collection[str] | None = None,
+    *,
+    split: str = "test",
 ) -> Selection:
-    """A small set for fast tests: test queries, their labelled products, and distractors.
+    """A small set: queries of one split, their labelled products, and distractors.
+
+    split is "test" (the mini set for CI) or "validation" (the set that decisions are made on).
 
     product_ids_in_planned_blocks, when given, limits the distractors to those products. The
     download script gives the products whose text it will read anyway, so the mini set
     needs few row groups.
     """
-    chosen, judgements = pick_mini_test_queries(selection, config)
+    chosen, judgements = pick_mini_queries_of_split(selection, config, split)
     mini_query_product_ids = {j.product_id for j in judgements}
     if len(mini_query_product_ids) > config.mini_products:
         raise ValueError(
