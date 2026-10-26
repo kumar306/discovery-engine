@@ -191,3 +191,15 @@ def test_qdrant_gets_time_to_flush_before_the_storage_is_saved_and_its_log_is_ke
     assert re.search(r"docker stop -t [3-9]\d", stop["run"])
     logs = [step for step in steps if "docker logs qdrant" in str(step.get("run", ""))]
     assert any(step.get("if") == "failure()" for step in logs)
+
+
+def test_the_qdrant_image_is_not_the_release_that_cannot_restart_after_a_filtered_write() -> None:
+    # Qdrant v1.17.0 panics at startup when its write-ahead log holds a set_payload or delete with a
+    # filter on point ids ("Can't deserialize entry"), fixed in v1.17.1; the worker writes such
+    # filters, see tests/integration/test_qdrant_restart.py for the real proof
+    compose = yaml.safe_load(
+        (ROOT / "deploy" / "compose" / "docker-compose.yml").read_text(encoding="utf-8")
+    )
+    tag = compose["services"]["qdrant"]["image"].split(":")[1]
+    assert tag != "v1.17.0"
+    assert "qdrant/qdrant:v1.17.0" not in (WORKFLOWS / "quality.yml").read_text(encoding="utf-8")
