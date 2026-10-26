@@ -326,3 +326,31 @@ async def test_a_unicode_line_separator_inside_a_product_text_does_not_split_a_l
     tiny_dataset(tmp_path / "mini", items=items)
     folder = await run_ladder(ladder_config(tmp_path), FakeEncoder(), ladder_search(), INDEXED)  # type: ignore[arg-type]
     assert folder.exists()
+
+
+async def test_the_expected_products_can_be_a_subset_of_the_dataset_for_a_smaller_corpus(
+    tmp_path: Path,
+) -> None:
+    # the distractor ladder searches a corpus of the judged products plus some of the distractors,
+    # the index must then hold exactly those, not the whole dataset
+    tiny_dataset(tmp_path / "mini")
+    folder = await run_ladder(
+        ladder_config(tmp_path),
+        FakeEncoder(),  # type: ignore[arg-type]
+        ladder_search(),  # type: ignore[arg-type]
+        {"P0", "P1", "P2"},
+        expected_product_ids={"P0", "P1", "P2"},
+    )
+    assert folder.exists()
+
+
+async def test_an_index_that_differs_from_the_expected_subset_is_refused(tmp_path: Path) -> None:
+    tiny_dataset(tmp_path / "mini")
+    with pytest.raises(LadderRefused, match=r"1 in the index are not in the dataset"):
+        await run_ladder(
+            ladder_config(tmp_path),
+            FakeEncoder(),  # type: ignore[arg-type]
+            ladder_search(),  # type: ignore[arg-type]
+            {"P0", "P1", "P2"},
+            expected_product_ids={"P0", "P1"},
+        )

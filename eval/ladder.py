@@ -141,6 +141,8 @@ async def run_ladder(
     encoder: QueryEncoder,
     search: QdrantSearch,
     indexed_product_ids: Collection[str],
+    *,
+    expected_product_ids: Collection[str] | None = None,
 ) -> Path:
     """Run every query through the four rungs, score them, and write the result folder."""
     directory = config.dataset_directory
@@ -151,8 +153,13 @@ async def run_ladder(
     # collection itself (read by the caller) are compared with the products of the dataset
     # the files are read line by line from the file, never with str.splitlines: that also breaks a
     # line at U+2028 and a few other characters, which real product texts contain
-    with (directory / "products.jsonl").open(encoding="utf-8") as handle:
-        dataset_product_ids = {json.loads(line)["product_id"] for line in handle}
+    # expected_product_ids names a smaller corpus than the file holds (the judged products plus the
+    # first distractors of the distractor ladder), without it the whole file is expected
+    if expected_product_ids is None:
+        with (directory / "products.jsonl").open(encoding="utf-8") as handle:
+            dataset_product_ids = {json.loads(line)["product_id"] for line in handle}
+    else:
+        dataset_product_ids = set(expected_product_ids)
     indexed = set(indexed_product_ids)
     if indexed != dataset_product_ids:
         raise LadderRefused(
