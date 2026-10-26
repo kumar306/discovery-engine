@@ -25,7 +25,7 @@ BUILDERS = {
     "validation": build_validation_dataset,
     "full": build_full_dataset,
 }
-DIRECTORIES = {"mini": "mini", "validation": "validation-mini", "full": "full"}
+DIRECTORIES = {"mini": "mini", "validation": "validation", "full": "full"}
 
 
 def main(argv: list[str] | None = None) -> None:
