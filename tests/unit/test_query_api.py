@@ -125,6 +125,9 @@ class Rig:
     def client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app), base_url="http://q")
 
+    def gauge(self, name: str) -> float:
+        return self.registry.get_sample_value(name) or 0.0
+
     def degraded_count(self, flow: str, retriever: str) -> float:
         value = self.registry.get_sample_value(
             "query_degraded_total", {"flow": flow, "retriever": retriever}
@@ -609,3 +612,56 @@ async def test_the_chunk_flow_also_measures_encode_and_search_apart() -> None:
     assert timings["encode_dense"] >= 190
     assert 90 <= timings["search_dense"] < 180
     assert timings["dense"] >= timings["encode_dense"] + timings["search_dense"] - 1.0
+
+
+# ---------------- requests inside, waiting for a permit, shed (M1-19 step C)
+
+
+async def test_the_admission_gauges_follow_the_requests_inside_and_the_ones_shed() -> None:
+    rig = Rig(max_inflight_requests=1, admission_wait_s=0.01)
+    rig.search.hold = asyncio.Event()
+    rig.search.grouped["dense"] = [hit("a")]
+    assert (rig.gauge("query_admission_in_flight"), rig.gauge("query_admission_waiting")) == (0, 0)
+    async with rig.client() as client:
+        first = asyncio.create_task(client.post("/v1/search", json={"query": "a"}))
+        await asyncio.wait_for(rig.search.entered.wait(), timeout=2)
+        assert rig.gauge("query_admission_in_flight") == 1
+        shed = await client.post("/v1/search", json={"query": "b"})
+        assert shed.status_code == 503
+        assert rig.gauge("query_admission_shed_total") == 1
+        # the shed request left the queue again
+        assert rig.gauge("query_admission_waiting") == 0
+        rig.search.hold.set()
+        await first
+    assert rig.gauge("query_admission_in_flight") == 0
+
+
+async def test_a_request_waiting_for_a_permit_is_counted_while_it_waits() -> None:
+    rig = Rig(max_inflight_requests=1, admission_wait_s=5.0)
+    rig.search.hold = asyncio.Event()
+    rig.search.grouped["dense"] = [hit("a")]
+    async with rig.client() as client:
+        first = asyncio.create_task(client.post("/v1/search", json={"query": "a"}))
+        await asyncio.wait_for(rig.search.entered.wait(), timeout=2)
+        second = asyncio.create_task(client.post("/v1/search", json={"query": "b"}))
+        for _ in range(100):
+            if rig.gauge("query_admission_waiting") == 1:
+                break
+            await asyncio.sleep(0.01)
+        assert rig.gauge("query_admission_waiting") == 1
+        assert rig.gauge("query_admission_in_flight") == 1
+        rig.search.hold.set()
+        assert (await first).status_code == 200
+        assert (await second).status_code == 200
+    assert (rig.gauge("query_admission_in_flight"), rig.gauge("query_admission_waiting")) == (0, 0)
+    assert rig.gauge("query_admission_shed_total") == 0
+
+
+async def test_only_an_overload_counts_as_shed_not_other_errors() -> None:
+    rig = Rig()
+    rig.search.errors[("grouped", "dense")] = RuntimeError("down")
+    rig.search.errors[("grouped", "bm25")] = RuntimeError("down")
+    response = await search(rig, {"query": "shoes"})  # a 503, but of the search backend
+    assert response.status_code == 503
+    assert response.json()["error"] == "unavailable"
+    assert rig.gauge("query_admission_shed_total") == 0

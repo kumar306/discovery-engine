@@ -281,3 +281,47 @@ async def test_the_sparse_query_reports_no_wait_it_uses_no_model_thread() -> Non
     finally:
         embedder.close()
     assert waits == []
+
+
+# how many dense query jobs are queued in front of the model threads right now (read by the metrics)
+
+
+async def test_queued_jobs_counts_the_jobs_that_have_not_started() -> None:
+    embedder = embedder_with(FakeDense(delay_s=0.3), FakeSparse())
+    try:
+        assert embedder.queued_jobs == 0
+        jobs = [asyncio.create_task(embedder.embed_query_dense(f"q{n}", 5.0)) for n in range(4)]
+        await asyncio.sleep(0.1)
+        # one job runs on the one model thread, three wait
+        assert embedder.queued_jobs == 3
+        await asyncio.gather(*jobs)
+        assert embedder.queued_jobs == 0
+    finally:
+        embedder.close()
+
+
+async def test_two_model_threads_leave_two_of_four_jobs_queued() -> None:
+    embedder = embedder_with(FakeDense(delay_s=0.3), FakeSparse(), workers=2)
+    try:
+        jobs = [asyncio.create_task(embedder.embed_query_dense(f"q{n}", 5.0)) for n in range(4)]
+        await asyncio.sleep(0.1)
+        assert embedder.queued_jobs == 2
+        await asyncio.gather(*jobs)
+    finally:
+        embedder.close()
+
+
+async def test_jobs_that_gave_up_do_not_stay_in_the_queued_count_for_ever() -> None:
+    embedder = embedder_with(FakeDense(delay_s=0.3), FakeSparse())
+    try:
+        first = asyncio.create_task(embedder.embed_query_dense("first", 5.0))
+        await asyncio.sleep(0.1)
+        waiting = [
+            asyncio.create_task(embedder.embed_query_dense(f"waiting {n}", 0.05)) for n in range(5)
+        ]
+        await asyncio.gather(*waiting, return_exceptions=True)
+        await first
+        await asyncio.sleep(0.2)  # the model thread takes the dropped jobs off the queue
+        assert embedder.queued_jobs == 0
+    finally:
+        embedder.close()

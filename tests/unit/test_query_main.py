@@ -9,6 +9,8 @@ from services.query.settings import QuerySettings
 
 
 class StubEmbedder:
+    queued_jobs = 5
+
     def close(self) -> None:
         return None
 
@@ -36,3 +38,5 @@ async def test_the_encoder_wait_of_the_embedder_reaches_the_metrics_endpoint(
         text = (await client.get("/metrics")).text
     assert "query_encode_wait_seconds_count 1.0" in text
     assert "query_encode_wait_seconds_sum 0.02" in text
+    # the queue depth is read from the embedder at the moment of the scrape
+    assert "query_encode_queued 5.0" in text

@@ -23,14 +23,23 @@ class Bulkhead:
         self._permits = asyncio.Semaphore(limit)
         self._wait_timeout = wait_timeout
         self.rejected = 0
+        # read by the metrics: calls inside the guarded section right now, and calls waiting for a
+        # permit right now (one event loop thread changes them, so plain integers are enough)
+        self.in_flight = 0
+        self.waiting = 0
 
     async def __aenter__(self) -> None:
+        self.waiting += 1
         try:
             async with asyncio.timeout(self._wait_timeout):
                 await self._permits.acquire()
         except TimeoutError:
             self.rejected += 1
             raise Overloaded("too many calls in flight") from None
+        finally:
+            # a caller leaves the waiting line whether it got a permit, timed out or was cancelled
+            self.waiting -= 1
+        self.in_flight += 1
 
     async def __aexit__(
         self,
@@ -39,4 +48,5 @@ class Bulkhead:
         traceback: TracebackType | None,
     ) -> None:
         # runs on success, on an exception and on cancellation, so a permit is never lost
+        self.in_flight -= 1
         self._permits.release()

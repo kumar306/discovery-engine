@@ -100,6 +100,31 @@ class QueryMetrics:
             buckets=STAGE_SECONDS_BUCKETS,
             registry=registry,
         )
+        # no labels, all four are read or counted at the admission limit and the encoder queue:
+        # the number of requests holding a permit, waiting for one, and refused because none
+        # came free in time (a 503 overloaded, not any other 503); the dense jobs queued in front
+        # of the model threads. The gauges are read at the moment of a scrape, so a spike shorter
+        # than the scrape interval is not seen in them
+        self.encode_queued = Gauge(
+            "query_encode_queued",
+            "Dense query jobs queued in front of the model threads right now.",
+            registry=registry,
+        )
+        self.admission_in_flight = Gauge(
+            "query_admission_in_flight",
+            "Requests holding an admission permit right now.",
+            registry=registry,
+        )
+        self.admission_waiting = Gauge(
+            "query_admission_waiting",
+            "Requests waiting for an admission permit right now.",
+            registry=registry,
+        )
+        self.admission_shed = Counter(
+            "query_admission_shed",
+            "Requests refused with a 503 because no admission permit came free in time.",
+            registry=registry,
+        )
         # retriever: dense or sparse, the one that was left out of an answer
         self.degraded = Counter(
             "query_degraded_total",

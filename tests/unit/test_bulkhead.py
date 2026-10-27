@@ -122,3 +122,77 @@ async def test_a_shed_caller_does_not_leak_or_steal_a_permit() -> None:
         with pytest.raises(Overloaded):
             async with bulkhead:
                 pass
+
+
+# how many calls are inside, and how many are waiting for a permit (read by the metrics)
+
+
+async def test_in_flight_and_waiting_count_the_callers_right_now() -> None:
+    bulkhead = Bulkhead(limit=2, wait_timeout=5.0)
+    gate = asyncio.Event()
+
+    async def work() -> None:
+        async with bulkhead:
+            await gate.wait()
+
+    assert (bulkhead.in_flight, bulkhead.waiting) == (0, 0)
+    tasks = [asyncio.create_task(work()) for _ in range(5)]
+    await settle()
+    # two hold a permit, three wait for one
+    assert (bulkhead.in_flight, bulkhead.waiting) == (2, 3)
+    gate.set()
+    await asyncio.gather(*tasks)
+    assert (bulkhead.in_flight, bulkhead.waiting) == (0, 0)
+
+
+async def test_a_caller_that_is_shed_leaves_the_waiting_count() -> None:
+    bulkhead = Bulkhead(limit=1, wait_timeout=0.01)
+    gate = asyncio.Event()
+
+    async def holder() -> None:
+        async with bulkhead:
+            await gate.wait()
+
+    task = asyncio.create_task(holder())
+    await settle()
+    with pytest.raises(Overloaded):
+        async with bulkhead:
+            pytest.fail("the body must not run without a permit")
+    assert (bulkhead.in_flight, bulkhead.waiting) == (1, 0)
+    gate.set()
+    await task
+    assert bulkhead.in_flight == 0
+
+
+async def test_a_waiter_that_is_cancelled_leaves_the_waiting_count() -> None:
+    bulkhead = Bulkhead(limit=1, wait_timeout=5.0)
+    gate = asyncio.Event()
+
+    async def holder() -> None:
+        async with bulkhead:
+            await gate.wait()
+
+    async def waiter() -> None:
+        async with bulkhead:
+            pytest.fail("the body must not run without a permit")
+
+    holding = asyncio.create_task(holder())
+    await settle()
+    waiting = asyncio.create_task(waiter())
+    await settle()
+    assert bulkhead.waiting == 1
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    assert (bulkhead.in_flight, bulkhead.waiting) == (1, 0)
+    gate.set()
+    await holding
+    assert bulkhead.in_flight == 0
+
+
+async def test_in_flight_goes_back_down_after_an_exception_in_the_body() -> None:
+    bulkhead = Bulkhead(limit=1, wait_timeout=0.01)
+    with pytest.raises(ValueError, match="boom"):
+        async with bulkhead:
+            raise ValueError("boom")
+    assert bulkhead.in_flight == 0

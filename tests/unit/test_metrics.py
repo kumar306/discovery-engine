@@ -43,6 +43,10 @@ QUERY: dict[str, tuple[str, tuple[str, ...]]] = {
     "query_request_seconds": ("histogram", ("route",)),
     "query_stage_seconds": ("histogram", ("flow", "stage")),
     "query_encode_wait_seconds": ("histogram", ()),
+    "query_encode_queued": ("gauge", ()),
+    "query_admission_in_flight": ("gauge", ()),
+    "query_admission_waiting": ("gauge", ()),
+    "query_admission_shed": ("counter", ()),
     "query_degraded": ("counter", ("flow", "retriever")),
 }
 

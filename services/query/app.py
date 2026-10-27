@@ -73,6 +73,9 @@ def create_app(
     register_chunk_route(app, chunk_flow)
     # the outermost limit, requests being served at once
     admission = admission or Bulkhead(settings.max_inflight_requests, settings.admission_wait_s)
+    # read at the moment of a scrape, nothing is counted on the request path
+    metrics.admission_in_flight.set_function(lambda: admission.in_flight)
+    metrics.admission_waiting.set_function(lambda: admission.waiting)
 
     def error_response(
         request: Request,
@@ -121,6 +124,7 @@ def create_app(
                     async with slot:
                         response = await call_next(request)
                 except Overloaded:
+                    metrics.admission_shed.inc()
                     response = error_response(
                         request,
                         503,

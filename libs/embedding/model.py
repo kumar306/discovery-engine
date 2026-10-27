@@ -153,6 +153,16 @@ class OnnxEmbedder:
         # back in the order the caller sent them, a missing slot would be a bug and raise
         return [results[index] for index in range(len(texts))]
 
+    @property
+    def queued_jobs(self) -> int:
+        """Dense query jobs handed to the pool that no model thread has taken yet.
+
+        This is the length of the executor's own queue. A job whose caller gave up stays in it
+        until a thread takes it and finds it cancelled, which takes no time, so the number is
+        right to within the jobs that are about to be dropped.
+        """
+        return int(self._onnx_executor._work_queue.qsize())
+
     async def embed_query_dense(self, text: str, timeout_s: float) -> list[float]:
         """The dense vector of one query, made the way a document is made."""
         loop = asyncio.get_running_loop()

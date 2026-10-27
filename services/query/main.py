@@ -28,6 +28,8 @@ def build(settings: QuerySettings | None = None) -> FastAPI:
         workers=settings.encode_workers,
         wait_observer=metrics.encode_wait_seconds.observe,
     )
+    # read from the embedder at the moment of a scrape
+    metrics.encode_queued.set_function(lambda: embedder.queued_jobs)
     encoder = OnnxQueryEncoder(embedder, settings.encode_timeout_s)
     search = QdrantSearch(qdrant_client, settings.qdrant_collection)
 
