@@ -317,3 +317,23 @@ def test_the_real_models_are_built_with_the_configured_threads_length_and_batch_
         assert embedder._sub_batch == 5
     finally:
         embedder.close()
+
+
+def test_the_factory_hands_the_wait_observer_to_the_embedder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeTextEmbedding:
+        def __init__(self, name: str, threads: int) -> None:
+            self.model = type("Inner", (), {"tokenizer": FakeHfTokenizer()})()
+
+    class FakeSparseTextEmbedding:
+        def __init__(self, name: str, avg_len: float) -> None: ...
+
+    monkeypatch.setattr(embedder_module, "TextEmbedding", FakeTextEmbedding)
+    monkeypatch.setattr(embedder_module, "SparseTextEmbedding", FakeSparseTextEmbedding)
+    waits: list[float] = []
+    embedder = embedder_module.build_onnx_embedder(EmbedSettings(), wait_observer=waits.append)
+    try:
+        assert embedder._wait_observer == waits.append
+    finally:
+        embedder.close()

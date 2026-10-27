@@ -89,6 +89,17 @@ class QueryMetrics:
             buckets=STAGE_SECONDS_BUCKETS,
             registry=registry,
         )
+        # no labels: how long a dense query job waited for a model thread before its call began,
+        # near zero while the encoder keeps up, growing when it is the thing that saturates
+        # a job that gives up while still queued never runs, so it never reports a wait: under
+        # heavy overload this histogram hides its own worst cases, read it beside query_degraded
+        # and the dense stage of query_stage_seconds
+        self.encode_wait_seconds = Histogram(
+            "query_encode_wait_seconds",
+            "Time a dense query job waited in the queue in front of the model thread.",
+            buckets=STAGE_SECONDS_BUCKETS,
+            registry=registry,
+        )
         # retriever: dense or sparse, the one that was left out of an answer
         self.degraded = Counter(
             "query_degraded_total",

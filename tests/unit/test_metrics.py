@@ -42,6 +42,7 @@ QUERY: dict[str, tuple[str, tuple[str, ...]]] = {
     "query_requests": ("counter", ("route", "status_class")),
     "query_request_seconds": ("histogram", ("route",)),
     "query_stage_seconds": ("histogram", ("flow", "stage")),
+    "query_encode_wait_seconds": ("histogram", ()),
     "query_degraded": ("counter", ("flow", "retriever")),
 }
 
@@ -144,3 +145,9 @@ def test_the_stage_histogram_uses_the_stage_buckets_and_the_request_histogram_do
     assert stage[:-1] == list(STAGE_SECONDS_BUCKETS)  # the last bound is +Inf
     assert request[0] == 0.005
     assert stage[0] < request[0]
+
+
+def test_the_encoder_wait_histogram_uses_the_stage_buckets() -> None:
+    registry = CollectorRegistry()
+    QueryMetrics(registry).encode_wait_seconds.observe(0.0004)
+    assert bucket_bounds(registry, "query_encode_wait_seconds")[:-1] == list(STAGE_SECONDS_BUCKETS)

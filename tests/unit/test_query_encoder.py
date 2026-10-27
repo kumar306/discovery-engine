@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -103,7 +104,12 @@ class FakeSparse:
         raise AssertionError("a query must never take the document path of the sparse model")
 
 
-def embedder_with(dense: FakeDense, sparse: FakeSparse, workers: int = 1) -> OnnxEmbedder:
+def embedder_with(
+    dense: FakeDense,
+    sparse: FakeSparse,
+    workers: int = 1,
+    wait_observer: Callable[[float], None] | None = None,
+) -> OnnxEmbedder:
     return OnnxEmbedder(
         dense,
         sparse,
@@ -112,6 +118,7 @@ def embedder_with(dense: FakeDense, sparse: FakeSparse, workers: int = 1) -> Onn
         dense_dim=4,
         sub_batch=4,
         workers=workers,
+        wait_observer=wait_observer,
     )
 
 
@@ -191,3 +198,86 @@ async def test_under_overload_only_the_running_jobs_are_wasted_not_the_whole_que
     assert len(answered) == 2
     # two answered, two started and abandoned, the other sixteen never started
     assert len(dense.started) <= 4
+
+
+# the wait in front of the model thread: how long a job sat in the queue before its model call began
+
+
+async def test_a_job_that_starts_at_once_reports_almost_no_wait() -> None:
+    waits: list[float] = []
+    embedder = embedder_with(FakeDense(), FakeSparse(), wait_observer=waits.append)
+    try:
+        await embedder.embed_query_dense("shoes", 5.0)
+    finally:
+        embedder.close()
+    assert len(waits) == 1
+    assert 0.0 <= waits[0] < 0.05
+
+
+async def test_a_job_behind_a_running_one_reports_the_time_it_waited() -> None:
+    waits: list[float] = []
+    embedder = embedder_with(FakeDense(delay_s=0.15), FakeSparse(), wait_observer=waits.append)
+    try:
+        await asyncio.gather(
+            embedder.embed_query_dense("first", 5.0), embedder.embed_query_dense("second", 5.0)
+        )
+    finally:
+        embedder.close()
+    first, second = sorted(waits)
+    assert first < 0.05
+    # the second job waited for the whole model call of the first
+    assert 0.12 <= second < 0.5
+
+
+async def test_two_model_threads_remove_the_wait_of_two_jobs() -> None:
+    waits: list[float] = []
+    embedder = embedder_with(
+        FakeDense(delay_s=0.15), FakeSparse(), workers=2, wait_observer=waits.append
+    )
+    try:
+        await asyncio.gather(
+            embedder.embed_query_dense("first", 5.0), embedder.embed_query_dense("second", 5.0)
+        )
+    finally:
+        embedder.close()
+    assert len(waits) == 2
+    assert max(waits) < 0.05
+
+
+async def test_a_job_that_gave_up_before_it_started_reports_no_wait() -> None:
+    waits: list[float] = []
+    embedder = embedder_with(FakeDense(delay_s=0.4), FakeSparse(), wait_observer=waits.append)
+    try:
+        first = asyncio.create_task(embedder.embed_query_dense("first", 5.0))
+        await asyncio.sleep(0.1)  # the first job is running on the one model thread
+        waiting = [
+            asyncio.create_task(embedder.embed_query_dense(f"waiting {n}", 0.05)) for n in range(5)
+        ]
+        await asyncio.gather(*waiting, return_exceptions=True)
+        await first
+        await asyncio.sleep(0.5)  # time for a job that was wrongly kept in the queue to start
+    finally:
+        embedder.close()
+    # only the job that really started is reported, the dropped ones never waited for the model
+    assert len(waits) == 1
+
+
+async def test_the_wait_is_reported_even_when_the_model_call_then_fails() -> None:
+    waits: list[float] = []
+    embedder = embedder_with(FakeDense(size=3), FakeSparse(), wait_observer=waits.append)
+    try:
+        with pytest.raises(ModelMismatch):
+            await embedder.embed_query_dense("shoes", 5.0)
+    finally:
+        embedder.close()
+    assert len(waits) == 1
+
+
+async def test_the_sparse_query_reports_no_wait_it_uses_no_model_thread() -> None:
+    waits: list[float] = []
+    embedder = embedder_with(FakeDense(), FakeSparse(), wait_observer=waits.append)
+    try:
+        await embedder.embed_query_sparse("shoes")
+    finally:
+        embedder.close()
+    assert waits == []

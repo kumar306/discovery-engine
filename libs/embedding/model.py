@@ -1,7 +1,7 @@
 import asyncio
 import functools
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -111,8 +111,12 @@ class OnnxEmbedder:
         dense_dim: int,
         sub_batch: int,
         workers: int = 1,
+        wait_observer: Callable[[float], None] | None = None,
     ) -> None:
         self._dense = dense
+        # told, from the model thread, how long a dense query job waited in the queue in front of
+        # it (the query service turns that into a histogram), nothing happens when it is None
+        self._wait_observer = wait_observer
         self._sparse = sparse
         self.tokenizer = tokenizer
         self.limits = limits
@@ -152,7 +156,8 @@ class OnnxEmbedder:
     async def embed_query_dense(self, text: str, timeout_s: float) -> list[float]:
         """The dense vector of one query, made the way a document is made."""
         loop = asyncio.get_running_loop()
-        run = functools.partial(self._query_dense, text)
+        # the clock starts here, when the job is handed to the pool, and stops on the model thread
+        run = functools.partial(self._query_dense, text, time.perf_counter())
         try:
             # the model call itself cannot be interrupted, the timeout stops the waiting, a job
             # that is still queued when its caller gives up is dropped, and the admission limit
@@ -167,7 +172,11 @@ class OnnxEmbedder:
         """The bm25 terms of one query: indices and weights. Cheap, so it needs no model thread."""
         return await asyncio.to_thread(self._query_sparse, text)
 
-    def _query_dense(self, text: str) -> list[float]:
+    def _query_dense(self, text: str, submitted: float) -> list[float]:
+        # the job just left the queue: the time since it was handed over is the wait, which is what
+        # tells a saturated encoder from a slow one (a job dropped while queued never gets here)
+        if self._wait_observer is not None:
+            self._wait_observer(time.perf_counter() - submitted)
         vector: list[float] = next(iter(self._dense.embed([text]))).tolist()
         if len(vector) != self._dense_dim:
             raise ModelMismatch(
@@ -223,7 +232,11 @@ class OnnxEmbedder:
         ]
 
 
-def build_onnx_embedder(settings: ModelSettings, workers: int = 1) -> OnnxEmbedder:
+def build_onnx_embedder(
+    settings: ModelSettings,
+    workers: int = 1,
+    wait_observer: Callable[[float], None] | None = None,
+) -> OnnxEmbedder:
     dense = TextEmbedding(settings.dense_model, threads=settings.embed_threads)
     sparse = SparseTextEmbedding("Qdrant/bm25", avg_len=settings.bm25_avg_len)
     # fastembed types its model as a base class that has no tokenizer, the onnx one has
@@ -237,6 +250,7 @@ def build_onnx_embedder(settings: ModelSettings, workers: int = 1) -> OnnxEmbedd
         dense_dim=settings.dense_dim,
         sub_batch=settings.embed_sub_batch,
         workers=workers,
+        wait_observer=wait_observer,
     )
 
 
