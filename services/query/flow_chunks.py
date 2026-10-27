@@ -83,6 +83,16 @@ class ChunkFlow:
         timings = {r.name: r.seconds * 1000 for r in retrievals}
         for r in retrievals:
             self._metrics.stage_seconds.labels(flow="chunks", stage=r.name).observe(r.seconds)
+            if r.encode_seconds is not None:
+                timings[f"encode_{r.name}"] = r.encode_seconds * 1000
+                self._metrics.stage_seconds.labels(flow="chunks", stage=f"encode_{r.name}").observe(
+                    r.encode_seconds
+                )
+            if r.search_seconds is not None:
+                timings[f"search_{r.name}"] = r.search_seconds * 1000
+                self._metrics.stage_seconds.labels(flow="chunks", stage=f"search_{r.name}").observe(
+                    r.search_seconds
+                )
         rankings = {r.name: r.hits for r in retrievals if r.hits is not None}
         degraded = [r.name for r in retrievals if r.hits is None]
         for name in degraded:
@@ -124,21 +134,29 @@ class ChunkFlow:
     ) -> Retrieval:
         started = time.perf_counter()
         hits: list[Hit] | None = None
+        encode_seconds: float | None = None
+        search_seconds: float | None = None
         try:
             async with asyncio.timeout(self._settings.retriever_timeout_s):
+                step_started = time.perf_counter()
                 if name == "dense":
                     vector = await self._encoder.encode_dense(query)
+                    encode_seconds = time.perf_counter() - step_started
+                    step_started = time.perf_counter()
                     hits = await self._search.chunk_search("dense", vector, filters, limit)
                 else:
                     terms = await self._encoder.encode_sparse(query)
+                    encode_seconds = time.perf_counter() - step_started
+                    step_started = time.perf_counter()
                     hits = await self._search.chunk_search("bm25", terms, filters, limit)
+                search_seconds = time.perf_counter() - step_started
         except Exception as error:
             # the type only, an error message may hold the query or a payload
             log.warning(
                 "retriever failed",
                 extra={"fields": {"retriever": name, "error_type": type(error).__name__}},
             )
-        return Retrieval(name, hits, time.perf_counter() - started)
+        return Retrieval(name, hits, time.perf_counter() - started, encode_seconds, search_seconds)
 
 
 def register_chunk_route(app: FastAPI, flow: ChunkFlow) -> None:

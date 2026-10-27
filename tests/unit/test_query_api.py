@@ -20,6 +20,17 @@ from services.query.primitives import Hit
 from services.query.search import Filters
 from services.query.settings import QuerySettings
 
+# the stages of one answer: each retriever as a whole, its two steps apart, and the fusion
+SEARCH_STAGES = {
+    "dense",
+    "sparse",
+    "fuse",
+    "encode_dense",
+    "search_dense",
+    "encode_sparse",
+    "search_sparse",
+}
+
 
 def hit(doc_id: str, idx: int = 0, score: float = 1.0, **fields: Any) -> Hit:
     values: dict[str, Any] = {
@@ -41,15 +52,20 @@ class FakeEncoder:
         self.sparse_error: BaseException | None = None
         self.dense_queries: list[str] = []
         self.sparse_queries: list[str] = []
+        # seconds each encode takes, to tell the encode time from the search time
+        self.dense_delay = 0.0
+        self.sparse_delay = 0.0
 
     async def encode_dense(self, query: str) -> list[float]:
         self.dense_queries.append(query)
+        await asyncio.sleep(self.dense_delay)
         if self.dense_error is not None:
             raise self.dense_error
         return [1.0, 0.0]
 
     async def encode_sparse(self, query: str) -> SparseQuery:
         self.sparse_queries.append(query)
+        await asyncio.sleep(self.sparse_delay)
         if self.sparse_error is not None:
             raise self.sparse_error
         return SparseQuery([1], [1.0])
@@ -147,7 +163,7 @@ async def test_flow_s_fuses_the_two_product_rankings(rig: Rig) -> None:
     assert [item["doc_id"] for item in body["results"]] == ["a", "b", "c", "d"]
     assert body["degraded"] == []
     assert body["request_id"] == response.headers["x-request-id"]
-    assert set(body["timings_ms"]) == {"dense", "sparse", "fuse"}
+    assert set(body["timings_ms"]) == SEARCH_STAGES
 
 
 async def test_explain_is_only_present_when_asked_for(rig: Rig) -> None:
@@ -475,3 +491,121 @@ def test_the_query_package_never_imports_a_database_or_the_worker() -> None:
 def test_the_two_flows_share_no_handler_code() -> None:
     assert "services.query.flow_chunks" not in imports_of(QUERY_PACKAGE / "flow_search.py")
     assert "services.query.flow_search" not in imports_of(QUERY_PACKAGE / "flow_chunks.py")
+
+
+# ---------------- stage timers: where the time of one request goes (M1-19)
+
+
+def stage_count(rig: Rig, flow: str, stage: str) -> float:
+    labels = {"flow": flow, "stage": stage}
+    return rig.registry.get_sample_value("query_stage_seconds_count", labels) or 0.0
+
+
+async def test_every_stage_of_a_search_is_timed_once_and_named_in_timings() -> None:
+    rig = Rig()
+    both_retrievers_answer(rig)
+    body = (await search(rig, {"query": "shoes"})).json()
+    assert set(body["timings_ms"]) == SEARCH_STAGES
+    assert {stage: stage_count(rig, "search", stage) for stage in SEARCH_STAGES} == dict.fromkeys(
+        SEARCH_STAGES, 1.0
+    )
+
+
+async def test_every_stage_of_a_chunk_request_is_timed_once_under_its_own_flow() -> None:
+    rig = Rig()
+    rig.search.chunks["dense"] = [hit("a")]
+    rig.search.chunks["bm25"] = [hit("a")]
+    body = (await chunks(rig, {"query": "shoes"})).json()
+    assert set(body["timings_ms"]) == SEARCH_STAGES
+    assert all(stage_count(rig, "chunks", stage) == 1.0 for stage in SEARCH_STAGES)
+    assert all(stage_count(rig, "search", stage) == 0.0 for stage in SEARCH_STAGES)
+
+
+async def test_the_encode_time_and_the_search_time_of_a_retriever_are_measured_apart() -> None:
+    rig = Rig()
+    both_retrievers_answer(rig)
+    rig.encoder.dense_delay = 0.2
+    rig.search.delays[("grouped", "dense")] = 0.1
+    timings = (await search(rig, {"query": "shoes"})).json()["timings_ms"]
+    assert timings["encode_dense"] >= 190
+    # at least its own 0.1 s, and well under the 0.2 s of the encode it must not contain
+    assert 90 <= timings["search_dense"] < 180
+    # a retriever is encode, then search: the whole is at least the two steps (1 ms of slack)
+    assert timings["dense"] >= timings["encode_dense"] + timings["search_dense"] - 1.0
+    # the sparse retriever had no delay at all
+    assert timings["encode_sparse"] < 100
+    assert timings["search_sparse"] < 100
+
+
+async def test_the_search_time_does_not_include_the_encode_time() -> None:
+    rig = Rig()
+    both_retrievers_answer(rig)
+    rig.encoder.sparse_delay = 0.2
+    timings = (await search(rig, {"query": "shoes"})).json()["timings_ms"]
+    assert timings["encode_sparse"] >= 190
+    assert timings["search_sparse"] < 100
+
+
+async def test_a_failed_encode_leaves_out_both_steps_of_that_retriever_but_not_its_total() -> None:
+    rig = Rig()
+    both_retrievers_answer(rig)
+    rig.encoder.dense_error = RuntimeError("boom")
+    body = (await search(rig, {"query": "shoes"})).json()
+    assert body["degraded"] == ["dense"]
+    assert "encode_dense" not in body["timings_ms"]
+    assert "search_dense" not in body["timings_ms"]
+    assert "dense" in body["timings_ms"]
+    assert stage_count(rig, "search", "encode_dense") == 0.0
+    assert stage_count(rig, "search", "search_dense") == 0.0
+    assert stage_count(rig, "search", "dense") == 1.0
+    # the other retriever is untouched
+    assert stage_count(rig, "search", "encode_sparse") == 1.0
+    assert stage_count(rig, "search", "search_sparse") == 1.0
+
+
+async def test_a_failed_search_keeps_the_encode_time_that_did_finish() -> None:
+    rig = Rig()
+    both_retrievers_answer(rig)
+    rig.search.errors[("grouped", "dense")] = RuntimeError("qdrant said no")
+    timings = (await search(rig, {"query": "shoes"})).json()["timings_ms"]
+    assert "encode_dense" in timings
+    assert "search_dense" not in timings
+
+
+async def test_a_search_that_times_out_is_not_counted_as_a_search_time() -> None:
+    rig = Rig(retriever_timeout_s=0.05)
+    both_retrievers_answer(rig)
+    rig.search.delays[("grouped", "bm25")] = 1.0
+    timings = (await search(rig, {"query": "shoes"})).json()["timings_ms"]
+    assert "encode_sparse" in timings
+    assert "search_sparse" not in timings
+    # the total of the retriever still shows the wait, that is where a timeout is seen
+    assert timings["sparse"] >= 40
+
+
+async def test_the_stage_label_has_only_the_seven_agreed_values() -> None:
+    rig = Rig(retriever_timeout_s=0.05)
+    both_retrievers_answer(rig)
+    rig.encoder.dense_error = RuntimeError("boom")
+    rig.search.delays[("grouped", "bm25")] = 1.0
+    await search(rig, {"query": "shoes"})
+    rig.search.chunks["dense"] = [hit("a")]
+    await chunks(rig, {"query": "shoes"})
+    seen = {
+        sample.labels["stage"]
+        for family in rig.registry.collect()
+        for sample in family.samples
+        if sample.name == "query_stage_seconds_count"
+    }
+    assert seen <= SEARCH_STAGES
+
+
+async def test_the_chunk_flow_also_measures_encode_and_search_apart() -> None:
+    rig = Rig()
+    rig.search.chunks["dense"] = [hit("a")]
+    rig.encoder.dense_delay = 0.2
+    rig.search.delays[("chunks", "dense")] = 0.1
+    timings = (await chunks(rig, {"query": "shoes"})).json()["timings_ms"]
+    assert timings["encode_dense"] >= 190
+    assert 90 <= timings["search_dense"] < 180
+    assert timings["dense"] >= timings["encode_dense"] + timings["search_dense"] - 1.0

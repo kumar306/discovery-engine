@@ -14,6 +14,29 @@ EVENT_SECONDS_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0
 # an api call takes milliseconds when it is refused and some seconds when s3 or postgres is slow
 REQUEST_SECONDS_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0)
 
+# one step of a search request: fusing takes a fraction of a millisecond, encoding one query about
+# five (so the edges around 5 ms are close together, or every encode would land in one bucket and no
+# quantile could be read), a Qdrant search tens of milliseconds, a retriever that timed out 2 s
+STAGE_SECONDS_BUCKETS = (
+    0.00025,
+    0.0005,
+    0.001,
+    0.002,
+    0.003,
+    0.005,
+    0.0075,
+    0.01,
+    0.015,
+    0.025,
+    0.04,
+    0.06,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.5,
+)
+
 
 class IngestMetrics:
     """What the ingest api counts, one series per route and status class, never per document."""
@@ -55,12 +78,15 @@ class QueryMetrics:
             buckets=REQUEST_SECONDS_BUCKETS,
             registry=registry,
         )
-        # flow: search or chunks; stage: dense, sparse or fuse
+        # flow: search or chunks
+        # stage: dense and sparse are a whole retriever (encode, then search), encode_dense,
+        # search_dense, encode_sparse and search_sparse are its two steps, fuse is the fusion;
+        # a step that did not finish (it raised, or the retriever timed out) is not observed
         self.stage_seconds = Histogram(
             "query_stage_seconds",
             "Time spent in one stage of a flow.",
             ["flow", "stage"],
-            buckets=REQUEST_SECONDS_BUCKETS,
+            buckets=STAGE_SECONDS_BUCKETS,
             registry=registry,
         )
         # retriever: dense or sparse, the one that was left out of an answer

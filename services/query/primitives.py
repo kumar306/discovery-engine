@@ -36,7 +36,11 @@ class Retrieval:
     # dense or sparse
     name: str
     hits: list[Hit] | None
+    # the whole retriever: encode, then search, and also the wait of one that failed or timed out
     seconds: float
+    # the two steps apart, None for a step that did not finish (it raised, or the timeout hit it)
+    encode_seconds: float | None
+    search_seconds: float | None
 
 
 @dataclass(frozen=True)
