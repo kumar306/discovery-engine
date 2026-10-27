@@ -2,7 +2,7 @@
 COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 UV := uv run
 
-.PHONY: help setup up down topics init test test-integration test-crash test-spark lint typecheck eval bench chaos deploy data data-validation data-full load-mini load-full oracle build-index distractor-ladder gate baseline quality
+.PHONY: help setup up down topics init test test-integration test-crash test-spark lint typecheck eval bench chaos deploy data data-validation data-full load-mini load-full oracle build-index distractor-ladder avg-len-preview gate baseline quality
 
 help:            ## list targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-18s %s\n",$$1,$$2}'
@@ -65,6 +65,11 @@ build-index:     ## fill a Qdrant collection straight from a dataset (no Kafka, 
 distractor-ladder: ## nDCG of the 500 validation queries as distractors double until two flat steps, needs EPSILON=0.01 and the dev stack, takes hours
 	@test -n "$(EPSILON)" || { echo "EPSILON is required, for example: make distractor-ladder EPSILON=0.01 (the band and its reason are in docs/DECISIONS.md)"; exit 1; }
 	$(UV) python -m eval.distractor_ladder --epsilon $(EPSILON)
+
+DISTRACTORS ?= 4000
+
+avg-len-preview: ## does the BM25 length constant change the ranking: the oracle ranks the validation queries with 64, the true mean, 256 and 512 (BM25 alone, offline, minutes), size: make avg-len-preview DISTRACTORS=500
+	$(UV) python -m eval.avg_len_preview --distractors $(DISTRACTORS)
 
 gate:            ## run the ladder, then fail if a rung lost more than 2 percent against benchmarks/baseline/ladder-mini.json
 	$(UV) python -m eval.ladder && $(UV) python -m eval.gate check
