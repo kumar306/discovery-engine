@@ -279,14 +279,21 @@ class PairedGain:
 
 
 def paired_bootstrap(
-    first: Sequence[float], second: Sequence[float], *, resamples: int, seed: int
+    first: Sequence[float],
+    second: Sequence[float],
+    *,
+    resamples: int,
+    seed: int,
+    confidence: float = 0.95,
 ) -> PairedGain:
     # first[i] and second[i] are the scores of two systems on the same query i
     # the gain on one query is second[i] - first[i], and we report the mean gain over the queries
     # with 50 queries that mean is noisy: another 50 queries would give another mean, so to see how
     # much we draw 50 queries from our 50 WITH replacement (a query may come twice, another not at
     # all), take the mean gain of that draw, and repeat `resamples` times
-    # the 2.5th and the 97.5th percentile of those means is a 95 percent interval
+    # the 2.5th and the 97.5th percentile of those means is a 95 percent interval, a higher
+    # confidence moves both ends outwards: 0.983 takes the 0.85th and the 99.15th percentile, it
+    # is used when one comparison is looked at several times (a wider interval for each look)
     # the same drawn queries count for both systems (paired), which is why the interval is narrower
     # than comparing two separate averages: a hard query is hard for both
     # example first [0.5, 0.5], second [0.6, 0.4]: gains +0.1 and -0.1, mean 0, a draw of two
@@ -298,15 +305,38 @@ def paired_bootstrap(
         raise ValueError("no queries, there is nothing to compare")
     if resamples < 1:
         raise ValueError("at least one resample is needed")
+    if not 0.0 < confidence < 1.0:
+        raise ValueError(f"the confidence must be between 0 and 1, not {confidence}")
     gains = [after - before for before, after in zip(first, second, strict=True)]
     generator = random.Random(seed)  # noqa: S311 - a repeatable sample, not a secret
     draw_means = sorted(
         statistics.fmean(generator.choices(gains, k=len(gains))) for _ in range(resamples)
     )
+    # the share cut off at each end, 0.025 for 95 percent, and the place of the cut in the sorted
+    # means; rounding to 9 digits keeps 0.025 * 1000 at 25 and not 25.000000000000004
+    tail = (1.0 - confidence) / 2.0
     return PairedGain(
         mean=statistics.fmean(gains),
-        low=draw_means[int(0.025 * resamples)],
-        high=draw_means[math.ceil(0.975 * resamples) - 1],
+        low=draw_means[int(round(tail * resamples, 9))],
+        high=draw_means[math.ceil(round((1.0 - tail) * resamples, 9)) - 1],
         # one query has no spread to measure, the sample standard deviation needs two
         sd=statistics.stdev(gains) if len(gains) > 1 else 0.0,
     )
+
+
+def queries_needed(gains: Sequence[float], target_gain: float, *, power: float = 0.8) -> int:
+    """How many queries it takes to see a gain of target_gain, given the spread of the gains."""
+    # the interval of a mean gain just clears zero when  n = ((z_alpha + z_power) * sd / gain) ** 2
+    #   z_alpha = 1.96 for a 95 percent interval, z_power = 0.8416 for an 80 percent chance to see
+    #   a gain that is really there
+    # example: sd 0.10 and a gain of 0.02: ((1.96 + 0.8416) * 0.10 / 0.02) ** 2 = 196.2, so 197
+    # a smaller gain needs many more queries (it grows with 1 / gain squared): 0.01 needs 785
+    if target_gain <= 0.0:
+        raise ValueError(f"the target gain must be above zero, not {target_gain}")
+    if not 0.0 < power < 1.0:
+        raise ValueError(f"the power must be between 0 and 1, not {power}")
+    if len(gains) < 2:
+        raise ValueError("the spread of the gains needs at least two queries")
+    normal = statistics.NormalDist()
+    z = normal.inv_cdf(0.975) + normal.inv_cdf(power)
+    return math.ceil((z * statistics.stdev(gains) / target_gain) ** 2)
