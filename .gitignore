@@ -36,6 +36,9 @@ checkpoints/
 metastore_db/
 derby.log
 
+# --- Private benchmark working files: rankings hold product ids, they stay on this machine ---------------------
+benchmarks/private/
+
 # --- Terraform (the lock file .terraform.lock.hcl IS committed) ---------------------------------------------
 .terraform/
 *.tfstate
