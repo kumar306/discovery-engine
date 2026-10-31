@@ -2,7 +2,7 @@
 COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 UV := uv run
 
-.PHONY: help setup up down topics init test test-integration test-crash test-spark lint typecheck eval bench chaos deploy data data-validation data-full load-mini load-full oracle build-index distractor-ladder avg-len-preview gate baseline quality
+.PHONY: help setup up down topics init test test-integration test-crash test-spark lint typecheck eval bench chaos deploy data data-validation data-full load-mini load-full oracle build-index distractor-ladder avg-len-preview bakeoff gate baseline quality
 
 help:            ## list targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-18s %s\n",$$1,$$2}'
@@ -70,6 +70,11 @@ DISTRACTORS ?= 4000
 
 avg-len-preview: ## does the BM25 length constant change the ranking: the oracle ranks the validation queries with 64, the true mean, 256 and 512 (BM25 alone, offline, minutes), size: make avg-len-preview DISTRACTORS=500
 	$(UV) python -m eval.avg_len_preview --distractors $(DISTRACTORS)
+
+BAKEOFF_DISTRACTORS ?= 500
+
+bakeoff:         ## which dense model: bge-small, arctic-embed-s and bge-base, each plain and with the query prefix, on the validation queries (hours, needs the dev stack and the model downloads, keep the machine idle), size: make bakeoff BAKEOFF_DISTRACTORS=500
+	$(UV) python -m eval.bakeoff --distractors $(BAKEOFF_DISTRACTORS)
 
 gate:            ## run the ladder, then fail if a rung lost more than 2 percent against benchmarks/baseline/ladder-mini.json
 	$(UV) python -m eval.ladder && $(UV) python -m eval.gate check
